@@ -1,0 +1,448 @@
+#!/bin/bash
+
+set -u
+
+readonly AGENTICMODE_VERSION="1.0.0"
+readonly AGENTICMODE_NAME="agenticmode"
+
+agentic_pmset="${AGENTICMODE_PMSET_BIN:-/usr/bin/pmset}"
+agentic_sudo="${AGENTICMODE_SUDO_BIN:-/usr/bin/sudo}"
+agentic_ps="${AGENTICMODE_PS_BIN:-/bin/ps}"
+agentic_sleep="${AGENTICMODE_SLEEP_BIN:-/bin/sleep}"
+agentic_uname="${AGENTICMODE_UNAME_BIN:-/usr/bin/uname}"
+agentic_find="${AGENTICMODE_FIND_BIN:-/usr/bin/find}"
+agentic_grep="${AGENTICMODE_GREP_BIN:-/usr/bin/grep}"
+agentic_awk="${AGENTICMODE_AWK_BIN:-/usr/bin/awk}"
+agentic_sed="${AGENTICMODE_SED_BIN:-/usr/bin/sed}"
+agentic_tail="${AGENTICMODE_TAIL_BIN:-/usr/bin/tail}"
+
+agentic_state_root="${AGENTICMODE_STATE_DIR:-${TMPDIR:-/tmp}/agenticmode-${UID}}"
+agentic_lock_dir="${agentic_state_root}/controller.lock"
+agentic_pid_file="${agentic_state_root}/controller.pid"
+agentic_mode_file="${agentic_state_root}/mode"
+agentic_started_file="${agentic_state_root}/started"
+agentic_targets_file="${agentic_state_root}/targets"
+agentic_stop_file="${agentic_state_root}/stop"
+agentic_owns_controller=0
+agentic_cleanup_quiet=0
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  agenticmode           Keep this Mac awake until Ctrl+C or `agenticmode off`
+  agenticmode current   Keep awake until runs active at launch have finished
+  agenticmode off       Restore normal sleep and stop the foreground controller
+  agenticmode status    Show the controller and macOS sleep state
+  agenticmode --help    Show this help
+  agenticmode --version Show the version
+USAGE
+}
+
+say() {
+  printf '%s\n' "$*"
+}
+
+warn() {
+  printf 'Warning: %s\n' "$*" >&2
+}
+
+fail() {
+  printf 'agenticmode: %s\n' "$*" >&2
+  exit 1
+}
+
+sleep_disabled_value() {
+  local value
+  value=$("$agentic_pmset" -g 2>/dev/null | "$agentic_awk" '$1 == "SleepDisabled" { value=$2 } END { if (value == "") value=0; print value }')
+  case "$value" in
+    1) printf '1\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
+validate_host() {
+  if [ "${AGENTICMODE_TESTING:-0}" != "1" ]; then
+    [ "$("$agentic_uname" -s 2>/dev/null)" = "Darwin" ] || fail "this command only supports macOS"
+    [ -x "$agentic_pmset" ] || fail "pmset was not found at $agentic_pmset"
+    [ -x "$agentic_sudo" ] || fail "sudo was not found at $agentic_sudo"
+    if ! "$agentic_pmset" -g batt 2>/dev/null | "$agentic_grep" -q 'InternalBattery'; then
+      fail "this command is intended for a Mac laptop with an internal battery"
+    fi
+  fi
+}
+
+controller_pid() {
+  local pid
+  [ -r "$agentic_pid_file" ] || return 1
+  IFS= read -r pid < "$agentic_pid_file" || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+controller_is_live() {
+  local pid command_line
+  pid=$(controller_pid) || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command_line=$("$agentic_ps" -p "$pid" -o command= 2>/dev/null || true)
+  case "$command_line" in
+    *agenticmode*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clear_stale_controller() {
+  rm -f "$agentic_pid_file" "$agentic_mode_file" "$agentic_started_file" \
+    "$agentic_targets_file" "$agentic_stop_file"
+  rmdir "$agentic_lock_dir" 2>/dev/null || true
+}
+
+acquire_controller() {
+  umask 077
+  mkdir -p "$agentic_state_root" || fail "cannot create state directory $agentic_state_root"
+  chmod 700 "$agentic_state_root" 2>/dev/null || true
+
+  if ! mkdir "$agentic_lock_dir" 2>/dev/null; then
+    if controller_is_live; then
+      local existing_mode existing_pid
+      existing_pid=$(controller_pid)
+      existing_mode=$(cat "$agentic_mode_file" 2>/dev/null || printf 'unknown')
+      say "Already active in $existing_mode mode (controller PID $existing_pid)."
+      exit 0
+    fi
+    clear_stale_controller
+    mkdir "$agentic_lock_dir" 2>/dev/null || fail "could not acquire the controller lock"
+  fi
+
+  printf '%s\n' "$$" > "$agentic_pid_file"
+  agentic_owns_controller=1
+}
+
+clear_owned_controller() {
+  local recorded_pid
+  [ "$agentic_owns_controller" -eq 1 ] || return 0
+  recorded_pid=$(controller_pid 2>/dev/null || true)
+  [ "$recorded_pid" = "$$" ] || return 0
+  rm -f "$agentic_pid_file" "$agentic_mode_file" "$agentic_started_file" \
+    "$agentic_targets_file" "$agentic_stop_file"
+  rmdir "$agentic_lock_dir" 2>/dev/null || true
+}
+
+enable_sleep_override() {
+  if [ "$(sleep_disabled_value)" = "1" ]; then
+    say "Lid-close sleep is already disabled."
+    return 0
+  fi
+
+  say "Enabling lid-closed operation. macOS may ask for your password."
+  "$agentic_sudo" "$agentic_pmset" -a disablesleep 1 || return 1
+  if [ "$(sleep_disabled_value)" != "1" ]; then
+    warn "macOS did not report SleepDisabled = 1"
+    return 1
+  fi
+  say "Lid-close sleep is disabled."
+}
+
+disable_sleep_override() {
+  if [ "$(sleep_disabled_value)" = "0" ]; then
+    [ "$agentic_cleanup_quiet" -eq 1 ] || say "Normal sleep is already enabled."
+    return 0
+  fi
+
+  [ "$agentic_cleanup_quiet" -eq 1 ] || say "Restoring normal sleep."
+  "$agentic_sudo" "$agentic_pmset" -a disablesleep 0 || return 1
+  if [ "$(sleep_disabled_value)" != "0" ]; then
+    warn "macOS still reports SleepDisabled = 1"
+    return 1
+  fi
+  [ "$agentic_cleanup_quiet" -eq 1 ] || say "Normal lid-close sleep is enabled."
+}
+
+cleanup_controller() {
+  local exit_code=$?
+  trap - EXIT INT TERM HUP
+
+  if [ "$agentic_owns_controller" -eq 1 ]; then
+    agentic_cleanup_quiet=0
+    if ! disable_sleep_override; then
+      warn "automatic cleanup failed; run: agenticmode off"
+      exit_code=1
+    fi
+    clear_owned_controller
+  fi
+  exit "$exit_code"
+}
+
+handle_signal() {
+  local signal_code="$1"
+  say ""
+  say "Stopping agenticmode."
+  exit "$signal_code"
+}
+
+install_controller_traps() {
+  trap cleanup_controller EXIT
+  trap 'handle_signal 130' INT
+  trap 'handle_signal 143' TERM
+  trap 'handle_signal 129' HUP
+}
+
+power_source_warning() {
+  if "$agentic_pmset" -g batt 2>/dev/null | "$agentic_grep" -q "Now drawing from 'Battery Power'"; then
+    warn "running with the lid closed on battery can drain the battery and create heat"
+  fi
+  warn "do not put the Mac in a bag while this mode is active"
+}
+
+start_controller() {
+  local mode="$1"
+  validate_host
+  acquire_controller
+  install_controller_traps
+  printf '%s\n' "$mode" > "$agentic_mode_file"
+  date '+%Y-%m-%d %H:%M:%S %z' > "$agentic_started_file"
+  rm -f "$agentic_stop_file"
+  enable_sleep_override || fail "could not disable sleep"
+  power_source_warning
+}
+
+run_indefinitely() {
+  start_controller "indefinite"
+  say "Agentic mode is on until Ctrl+C or agenticmode off."
+  while [ ! -e "$agentic_stop_file" ]; do
+    "$agentic_sleep" 5
+  done
+}
+
+codex_home_path() {
+  if [ -n "${AGENTICMODE_CODEX_HOME:-}" ]; then
+    printf '%s\n' "$AGENTICMODE_CODEX_HOME"
+  elif [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME"
+  else
+    printf '%s/.codex\n' "$HOME"
+  fi
+}
+
+last_codex_lifecycle_line() {
+  local file="$1"
+  "$agentic_grep" -E '"type":"event_msg","payload":\{"type":"(task_started|task_complete|turn_aborted)"' "$file" 2>/dev/null | "$agentic_tail" -n 1
+}
+
+snapshot_active_codex_turns() {
+  local codex_sessions file lifecycle turn_id
+  codex_sessions="$(codex_home_path)/sessions"
+  [ -d "$codex_sessions" ] || return 0
+
+  while IFS= read -r file; do
+    lifecycle=$(last_codex_lifecycle_line "$file")
+    case "$lifecycle" in
+      *'"type":"task_started"'*)
+        turn_id=$(printf '%s\n' "$lifecycle" | "$agentic_sed" -n 's/.*"turn_id":"\([^"]*\)".*/\1/p')
+        [ -n "$turn_id" ] && printf 'codex|%s|%s\n' "$turn_id" "$file"
+        ;;
+    esac
+  done < <("$agentic_find" "$codex_sessions" -type f -name '*.jsonl' -print 2>/dev/null)
+}
+
+ancestor_pid_list() {
+  local next ancestors parent
+  next="$$"
+  ancestors=",$$,"
+  while :; do
+    parent=$("$agentic_ps" -p "$next" -o ppid= 2>/dev/null | "$agentic_awk" '{print $1}')
+    case "$parent" in
+      ''|0|1) break ;;
+      *[!0-9]*) break ;;
+    esac
+    ancestors="${ancestors}${parent},"
+    next="$parent"
+  done
+  printf '%s\n' "$ancestors"
+}
+
+snapshot_active_agent_processes() {
+  local ancestors pid process_name started
+  ancestors=$(ancestor_pid_list)
+
+  while IFS='|' read -r pid process_name; do
+    [ -n "$pid" ] || continue
+    case "$ancestors" in
+      *",${pid},"*) continue ;;
+    esac
+    started=$("$agentic_ps" -p "$pid" -o lstart= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$started" ] && printf 'process|%s|%s|%s\n' "$pid" "$started" "$process_name"
+  done < <("$agentic_ps" -axo pid=,ucomm=,args= 2>/dev/null | "$agentic_awk" '
+    {
+      pid=$1
+      comm=$2
+      name=comm
+      sub(/^.*\//, "", name)
+      line=$0
+      matched=""
+
+      if (name == "codex" || name == "claude" || name == "gemini" || name == "aider" || name == "opencode") {
+        matched=name
+      } else if ((name == "node" || name == "python" || name == "python3") &&
+                 line ~ /(claude-code|@anthropic-ai\/claude|gemini-cli|\/aider[^[:space:]]*|\/opencode[^[:space:]]*|\/codex[^[:space:]]*)/) {
+        matched=name
+      }
+
+      if (matched != "" && line !~ /[[:space:]]app-server([[:space:]]|$)/ && line !~ /codex-code-mode-host/) {
+        print pid "|" matched
+      }
+    }
+  ')
+}
+
+codex_target_is_active() {
+  local turn_id="$1" file="$2" lifecycle
+  [ -r "$file" ] || return 1
+  lifecycle=$("$agentic_grep" -F "\"turn_id\":\"${turn_id}\"" "$file" 2>/dev/null | \
+    "$agentic_grep" -E '"type":"event_msg","payload":\{"type":"(task_started|task_complete|turn_aborted)"' | \
+    "$agentic_tail" -n 1)
+  case "$lifecycle" in
+    *'"type":"task_started"'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+process_target_is_active() {
+  local pid="$1" expected_start="$2" state actual_start
+  kill -0 "$pid" 2>/dev/null || return 1
+  state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+  [ "$state" != "Z" ] || return 1
+  actual_start=$("$agentic_ps" -p "$pid" -o lstart= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ "$actual_start" = "$expected_start" ]
+}
+
+remaining_target_count() {
+  local kind first second rest count
+  count=0
+  [ -r "$agentic_targets_file" ] || { printf '0\n'; return; }
+
+  while IFS='|' read -r kind first second rest; do
+    case "$kind" in
+      codex)
+        if codex_target_is_active "$first" "$second"; then
+          count=$((count + 1))
+        fi
+        ;;
+      process)
+        if process_target_is_active "$first" "$second"; then
+          count=$((count + 1))
+        fi
+        ;;
+    esac
+  done < "$agentic_targets_file"
+  printf '%s\n' "$count"
+}
+
+run_current() {
+  local codex_count process_count total remaining previous
+  start_controller "current"
+
+  : > "$agentic_targets_file"
+  snapshot_active_codex_turns >> "$agentic_targets_file"
+  snapshot_active_agent_processes >> "$agentic_targets_file"
+
+  codex_count=$("$agentic_awk" -F '|' '$1 == "codex" { count++ } END { print count+0 }' "$agentic_targets_file")
+  process_count=$("$agentic_awk" -F '|' '$1 == "process" { count++ } END { print count+0 }' "$agentic_targets_file")
+  total=$((codex_count + process_count))
+
+  if [ "$total" -eq 0 ]; then
+    say "No active agent runs were found."
+    return 0
+  fi
+
+  say "Tracking $total current agent run(s): $codex_count Codex turn(s), $process_count agent process(es)."
+  say "Runs started after this snapshot are not included. Press Ctrl+C to stop early."
+  previous="$total"
+
+  while [ ! -e "$agentic_stop_file" ]; do
+    remaining=$(remaining_target_count)
+    if [ "$remaining" -eq 0 ]; then
+      say "All tracked runs have finished."
+      return 0
+    fi
+    if [ "$remaining" -ne "$previous" ]; then
+      say "$remaining tracked run(s) still active."
+      previous="$remaining"
+    fi
+    "$agentic_sleep" 5
+  done
+}
+
+turn_off() {
+  local pid=""
+  validate_host
+  if controller_is_live; then
+    pid=$(controller_pid)
+    : > "$agentic_stop_file" 2>/dev/null || true
+  fi
+
+  disable_sleep_override || fail "could not restore normal sleep"
+
+  if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    say "Stopped controller PID $pid."
+  elif ! controller_is_live; then
+    clear_stale_controller
+  fi
+}
+
+show_status() {
+  local sleep_state mode pid started
+  validate_host
+  sleep_state=$(sleep_disabled_value)
+  if [ "$sleep_state" = "1" ]; then
+    say "macOS sleep: disabled"
+  else
+    say "macOS sleep: normal"
+  fi
+
+  if controller_is_live; then
+    pid=$(controller_pid)
+    mode=$(cat "$agentic_mode_file" 2>/dev/null || printf 'unknown')
+    started=$(cat "$agentic_started_file" 2>/dev/null || printf 'unknown')
+    say "Controller: active"
+    say "Mode: $mode"
+    say "PID: $pid"
+    say "Started: $started"
+    if [ "$mode" = "current" ]; then
+      say "Tracked runs remaining: $(remaining_target_count)"
+    fi
+  else
+    say "Controller: not running"
+    if [ "$sleep_state" = "1" ]; then
+      warn "sleep is disabled without an active controller; run: agenticmode off"
+    fi
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    '') run_indefinitely ;;
+    current)
+      [ "$#" -eq 1 ] || fail "current does not accept extra arguments"
+      run_current
+      ;;
+    off)
+      [ "$#" -eq 1 ] || fail "off does not accept extra arguments"
+      turn_off
+      ;;
+    status)
+      [ "$#" -eq 1 ] || fail "status does not accept extra arguments"
+      show_status
+      ;;
+    -h|--help|help) usage ;;
+    -v|--version|version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION" ;;
+    *)
+      usage >&2
+      fail "unknown command: $1"
+      ;;
+  esac
+}
+
+main "$@"
