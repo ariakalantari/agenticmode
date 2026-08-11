@@ -2,39 +2,120 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.0.0"
+readonly AGENTICMODE_VERSION="1.1.0"
 readonly AGENTICMODE_NAME="agenticmode"
 
-agentic_pmset="${AGENTICMODE_PMSET_BIN:-/usr/bin/pmset}"
-agentic_sudo="${AGENTICMODE_SUDO_BIN:-/usr/bin/sudo}"
-agentic_ps="${AGENTICMODE_PS_BIN:-/bin/ps}"
-agentic_sleep="${AGENTICMODE_SLEEP_BIN:-/bin/sleep}"
-agentic_uname="${AGENTICMODE_UNAME_BIN:-/usr/bin/uname}"
-agentic_find="${AGENTICMODE_FIND_BIN:-/usr/bin/find}"
-agentic_grep="${AGENTICMODE_GREP_BIN:-/usr/bin/grep}"
-agentic_awk="${AGENTICMODE_AWK_BIN:-/usr/bin/awk}"
-agentic_sed="${AGENTICMODE_SED_BIN:-/usr/bin/sed}"
-agentic_tail="${AGENTICMODE_TAIL_BIN:-/usr/bin/tail}"
+agentic_pmset=/usr/bin/pmset
+agentic_sudo=/usr/bin/sudo
+agentic_ps=/bin/ps
+agentic_sleep=/bin/sleep
+agentic_uname=/usr/bin/uname
+agentic_find=/usr/bin/find
+agentic_grep=/usr/bin/grep
+agentic_awk=/usr/bin/awk
+agentic_sed=/usr/bin/sed
+agentic_tail=/usr/bin/tail
+agentic_stat=/usr/bin/stat
+agentic_base64=/usr/bin/base64
+agentic_sqlite=/usr/bin/sqlite3
+agentic_lockf=/usr/bin/lockf
+if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
+  agentic_pmset="${AGENTICMODE_PMSET_BIN:-$agentic_pmset}"
+  agentic_sudo="${AGENTICMODE_SUDO_BIN:-$agentic_sudo}"
+  agentic_ps="${AGENTICMODE_PS_BIN:-$agentic_ps}"
+  agentic_sleep="${AGENTICMODE_SLEEP_BIN:-$agentic_sleep}"
+  agentic_uname="${AGENTICMODE_UNAME_BIN:-$agentic_uname}"
+  agentic_find="${AGENTICMODE_FIND_BIN:-$agentic_find}"
+  agentic_grep="${AGENTICMODE_GREP_BIN:-$agentic_grep}"
+  agentic_awk="${AGENTICMODE_AWK_BIN:-$agentic_awk}"
+  agentic_sed="${AGENTICMODE_SED_BIN:-$agentic_sed}"
+  agentic_tail="${AGENTICMODE_TAIL_BIN:-$agentic_tail}"
+  agentic_stat="${AGENTICMODE_STAT_BIN:-$agentic_stat}"
+  agentic_base64="${AGENTICMODE_BASE64_BIN:-$agentic_base64}"
+  agentic_sqlite="${AGENTICMODE_SQLITE_BIN:-$agentic_sqlite}"
+fi
+agentic_watchdog_bin=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
+[ "${AGENTICMODE_TESTING:-0}" != "1" ] || agentic_watchdog_bin="${AGENTICMODE_WATCHDOG_BIN:-$agentic_watchdog_bin}"
 
-agentic_state_root="${AGENTICMODE_STATE_DIR:-${TMPDIR:-/tmp}/agenticmode-${UID}}"
+agentic_config_file="${AGENTICMODE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agenticmode/config}"
+agentic_config_explicit=0
+agentic_poll_seconds=5
+agentic_timeout="0"
+agentic_timeout_seconds=0
+agentic_min_battery=0
+agentic_include_codex=1
+agentic_include_processes=1
+agentic_process_policy="oneshot"
+agentic_process_names="codex,claude,gemini,aider,opencode"
+agentic_custom_process_names=""
+agentic_codex_stale_seconds=0
+agentic_codex_home=""
+agentic_extra_pids=""
+agentic_extra_process_names=""
+agentic_command="indefinite"
+agentic_command_args=()
+
+agentic_state_root="${AGENTICMODE_STATE_DIR:-$HOME/Library/Caches/agenticmode}"
 agentic_lock_dir="${agentic_state_root}/controller.lock"
+agentic_lock_pid_file="${agentic_lock_dir}/pid"
+agentic_lock_started_file="${agentic_lock_dir}/process-started"
 agentic_pid_file="${agentic_state_root}/controller.pid"
+agentic_pid_started_file="${agentic_state_root}/controller.process-started"
+agentic_watchdog_pid_file="${agentic_state_root}/watchdog.pid"
+agentic_watchdog_started_file="${agentic_state_root}/watchdog.process-started"
+agentic_baseline_file="${agentic_state_root}/baseline"
 agentic_mode_file="${agentic_state_root}/mode"
 agentic_started_file="${agentic_state_root}/started"
+agentic_started_epoch_file="${agentic_state_root}/started.epoch"
+agentic_deadline_file="${agentic_state_root}/deadline.epoch"
 agentic_targets_file="${agentic_state_root}/targets"
-agentic_stop_file="${agentic_state_root}/stop"
+agentic_offsets_dir="${agentic_state_root}/codex-offsets"
+agentic_legacy_stop_file="${agentic_state_root}/stop"
+agentic_watchdog_stop_path_file="${agentic_state_root}/watchdog.stop-path"
+agentic_watchdog_leases_dir="${agentic_state_root}/watchdog-leases"
+agentic_stop_file="$agentic_legacy_stop_file"
+agentic_operation_file="${agentic_state_root}/operation.lockfile"
 agentic_owns_controller=0
-agentic_cleanup_quiet=0
+agentic_owns_operation=0
+agentic_watchdog_pid=""
+agentic_timer_pid=""
+agentic_stop_reason=""
 
 usage() {
   cat <<'USAGE'
 Usage:
-  agenticmode           Keep this Mac awake until Ctrl+C or `agenticmode off`
-  agenticmode current   Keep awake until runs active at launch have finished
-  agenticmode off       Restore normal sleep and stop the foreground controller
-  agenticmode status    Show the controller and macOS sleep state
-  agenticmode --help    Show this help
-  agenticmode --version Show the version
+  agenticmode [options]
+      Keep this Mac awake until Ctrl+C or `agenticmode off`.
+
+  agenticmode current [options]
+      Snapshot active runs, wait for those exact runs, then restore sleep.
+
+  agenticmode run [options] -- command [args...]
+      Keep awake for the exact lifetime of a command's top-level process.
+
+  agenticmode wait [options] PID [PID...]
+      Keep awake until the specified existing processes exit.
+
+  agenticmode detect [options]
+      Show what `current` would track without changing power settings.
+
+  agenticmode status [--verbose]
+  agenticmode doctor
+  agenticmode config
+  agenticmode off
+
+Options:
+  --timeout DURATION       Stop after a duration such as 90m, 8h, or 3600s.
+  --min-battery PERCENT   Restore sleep at or below this level on battery.
+  --poll SECONDS          Poll interval from 1 to 300 seconds.
+  --pid PID               Add an exact existing process to `current` or `detect`.
+  --process NAME          Add an executable name to process detection.
+  --process-policy MODE   `oneshot` (default) or `session`.
+  --no-codex              Disable Codex JSONL lifecycle detection.
+  --no-processes          Disable agent process detection.
+  --config PATH           Read a specific strict key=value config file.
+  -h, --help              Show this help.
+  -v, --version           Show the version.
 USAGE
 }
 
@@ -51,134 +132,679 @@ fail() {
   exit 1
 }
 
+trim_value() {
+  printf '%s\n' "$1" | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+find_config_argument() {
+  local previous="" argument
+  for argument in "$@"; do
+    if [ "$previous" = "--config" ]; then
+      agentic_config_file="$argument"
+      agentic_config_explicit=1
+      return 0
+    fi
+    [ "$argument" != "--" ] || return 0
+    previous="$argument"
+  done
+}
+
+config_file_is_safe() {
+  local owner mode group_digit other_digit
+  [ -f "$agentic_config_file" ] || fail "config path must be a regular file: $agentic_config_file"
+  [ ! -L "$agentic_config_file" ] || fail "refusing symlinked config file: $agentic_config_file"
+  owner=$("$agentic_stat" -f '%u' "$agentic_config_file" 2>/dev/null) || fail "cannot inspect config ownership"
+  [ "$owner" = "$UID" ] || fail "config file must be owned by your user"
+  mode=$("$agentic_stat" -f '%Lp' "$agentic_config_file" 2>/dev/null) || fail "cannot inspect config permissions"
+  group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  case "$group_digit$other_digit" in
+    *2*|*3*|*6*|*7*) fail "config file must not be group- or world-writable" ;;
+  esac
+  return 0
+}
+
+apply_config_value() {
+  local key="$1" value="$2"
+  case "$key" in
+    POLL_SECONDS|poll_seconds) agentic_poll_seconds="$value" ;;
+    TIMEOUT|timeout|max_duration) agentic_timeout="$value" ;;
+    MIN_BATTERY|min_battery) agentic_min_battery="$value" ;;
+    INCLUDE_CODEX|include_codex) agentic_include_codex="$value" ;;
+    INCLUDE_PROCESSES|include_processes) agentic_include_processes="$value" ;;
+    PROCESS_POLICY|process_policy) agentic_process_policy="$value" ;;
+    PROCESS_NAMES|process_names) agentic_process_names="$value" ;;
+    CUSTOM_PROCESS_NAMES|custom_process_names) agentic_custom_process_names="$value" ;;
+    CODEX_STALE_SECONDS|codex_stale_seconds) agentic_codex_stale_seconds="$value" ;;
+    CODEX_HOME|codex_home) agentic_codex_home="$value" ;;
+    '') ;;
+    *) fail "unknown config key: $key" ;;
+  esac
+}
+
+load_config() {
+  local line key value
+  [ ! -L "$agentic_config_file" ] || fail "refusing symlinked config file: $agentic_config_file"
+  if [ -e "$agentic_config_file" ]; then
+    config_file_is_safe || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=$(trim_value "$line")
+      case "$line" in
+        ''|'#'*) continue ;;
+        *=*)
+          key=$(trim_value "${line%%=*}")
+          value=$(trim_value "${line#*=}")
+          apply_config_value "$key" "$value"
+          ;;
+        *) fail "invalid config line: $line" ;;
+      esac
+    done < "$agentic_config_file"
+  else
+    [ "$agentic_config_explicit" -eq 0 ] || fail "config file not found: $agentic_config_file"
+  fi
+
+  [ -z "${AGENTICMODE_POLL_SECONDS:-}" ] || agentic_poll_seconds="$AGENTICMODE_POLL_SECONDS"
+  [ -z "${AGENTICMODE_TIMEOUT:-}" ] || agentic_timeout="$AGENTICMODE_TIMEOUT"
+  [ -z "${AGENTICMODE_MIN_BATTERY:-}" ] || agentic_min_battery="$AGENTICMODE_MIN_BATTERY"
+  [ -z "${AGENTICMODE_PROCESS_POLICY:-}" ] || agentic_process_policy="$AGENTICMODE_PROCESS_POLICY"
+  [ -z "${AGENTICMODE_PROCESS_NAMES:-}" ] || agentic_process_names="$AGENTICMODE_PROCESS_NAMES"
+  [ -z "${AGENTICMODE_CUSTOM_PROCESS_NAMES:-}" ] || agentic_custom_process_names="$AGENTICMODE_CUSTOM_PROCESS_NAMES"
+  [ -z "${AGENTICMODE_INCLUDE_CODEX:-}" ] || agentic_include_codex="$AGENTICMODE_INCLUDE_CODEX"
+  [ -z "${AGENTICMODE_INCLUDE_PROCESSES:-}" ] || agentic_include_processes="$AGENTICMODE_INCLUDE_PROCESSES"
+  [ -z "${AGENTICMODE_CODEX_STALE_SECONDS:-}" ] || agentic_codex_stale_seconds="$AGENTICMODE_CODEX_STALE_SECONDS"
+}
+
+parse_duration() {
+  local input="$1" number multiplier maximum
+  case "$input" in
+    0) printf '0\n'; return 0 ;;
+    *s) number=${input%s}; multiplier=1 ;;
+    *m) number=${input%m}; multiplier=60 ;;
+    *h) number=${input%h}; multiplier=3600 ;;
+    *d) number=${input%d}; multiplier=86400 ;;
+    *) number="$input"; multiplier=1 ;;
+  esac
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$number" -gt 0 ] || return 1
+  maximum=$((31536000 / multiplier))
+  [ "${#number}" -le 9 ] && [ "$number" -le "$maximum" ] || return 1
+  printf '%s\n' "$((number * multiplier))"
+}
+
+valid_process_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._+-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+validate_process_name_list() {
+  local list="$1" allow_empty="$2" old_ifs name
+  if [ -z "$list" ]; then
+    [ "$allow_empty" -eq 1 ] && return 0
+    fail "process_names must not be empty"
+  fi
+  old_ifs=$IFS
+  IFS=','
+  for name in $list; do
+    valid_process_name "$name" || { IFS=$old_ifs; fail "invalid process name: $name"; }
+  done
+  IFS=$old_ifs
+}
+
+add_extra_pid() {
+  local pid="$1"
+  case "$pid" in
+    ''|*[!0-9]*) fail "invalid PID: $pid" ;;
+  esac
+  [ "$pid" -gt 1 ] || fail "invalid PID: $pid"
+  if [ -z "$agentic_extra_pids" ]; then
+    agentic_extra_pids="$pid"
+  else
+    agentic_extra_pids="$agentic_extra_pids,$pid"
+  fi
+}
+
+add_process_name() {
+  valid_process_name "$1" || fail "invalid process name: $1"
+  if [ -z "$agentic_extra_process_names" ]; then
+    agentic_extra_process_names="$1"
+  else
+    agentic_extra_process_names="$agentic_extra_process_names,$1"
+  fi
+}
+
+parse_cli() {
+  case "${1:-}" in
+    current|run|wait|detect|status|doctor|config|off)
+      agentic_command="$1"
+      shift
+      ;;
+    help|-h|--help) usage; exit 0 ;;
+    version|-v|--version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION"; exit 0 ;;
+  esac
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --config)
+        [ "$#" -ge 2 ] || fail "--config requires a path"
+        shift 2
+        ;;
+      --timeout)
+        [ "$#" -ge 2 ] || fail "--timeout requires a duration"
+        agentic_timeout="$2"
+        shift 2
+        ;;
+      --min-battery)
+        [ "$#" -ge 2 ] || fail "--min-battery requires a percentage"
+        agentic_min_battery="$2"
+        shift 2
+        ;;
+      --poll)
+        [ "$#" -ge 2 ] || fail "--poll requires seconds"
+        agentic_poll_seconds="$2"
+        shift 2
+        ;;
+      --pid)
+        [ "$#" -ge 2 ] || fail "--pid requires a PID"
+        add_extra_pid "$2"
+        shift 2
+        ;;
+      --process)
+        [ "$#" -ge 2 ] || fail "--process requires an executable name"
+        add_process_name "$2"
+        shift 2
+        ;;
+      --process-policy)
+        [ "$#" -ge 2 ] || fail "--process-policy requires oneshot or session"
+        agentic_process_policy="$2"
+        shift 2
+        ;;
+      --no-codex) agentic_include_codex=0; shift ;;
+      --no-processes) agentic_include_processes=0; shift ;;
+      --verbose)
+        [ "$agentic_command" = "status" ] || fail "--verbose is only valid with status"
+        agentic_command_args+=("--verbose")
+        shift
+        ;;
+      --)
+        shift
+        agentic_command_args=("$@")
+        break
+        ;;
+      -h|--help) usage; exit 0 ;;
+      -v|--version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION"; exit 0 ;;
+      *)
+        if [ "$agentic_command" = "wait" ]; then
+          add_extra_pid "$1"
+          shift
+        elif [ "$agentic_command" = "run" ]; then
+          fail "put -- before the command to run"
+        else
+          fail "unknown argument: $1"
+        fi
+        ;;
+    esac
+  done
+}
+
+validate_configuration() {
+  case "$agentic_poll_seconds" in
+    ''|*[!0-9]*) fail "poll_seconds must be an integer" ;;
+  esac
+  [ "$agentic_poll_seconds" -ge 1 ] && [ "$agentic_poll_seconds" -le 300 ] || fail "poll_seconds must be from 1 to 300"
+
+  agentic_timeout_seconds=$(parse_duration "$agentic_timeout") || fail "invalid timeout: $agentic_timeout"
+  case "$agentic_min_battery" in
+    ''|*[!0-9]*) fail "min_battery must be an integer" ;;
+  esac
+  [ "$agentic_min_battery" -ge 0 ] && [ "$agentic_min_battery" -le 100 ] || fail "min_battery must be from 0 to 100"
+  case "$agentic_include_codex" in 0|1) ;; *) fail "include_codex must be 0 or 1" ;; esac
+  case "$agentic_include_processes" in 0|1) ;; *) fail "include_processes must be 0 or 1" ;; esac
+  case "$agentic_process_policy" in oneshot|session) ;; *) fail "process_policy must be oneshot or session" ;; esac
+  validate_process_name_list "$agentic_process_names" 0
+  validate_process_name_list "$agentic_custom_process_names" 1
+  case "$agentic_codex_stale_seconds" in ''|*[!0-9]*) fail "codex_stale_seconds must be a nonnegative integer" ;; esac
+  [ "${#agentic_codex_stale_seconds}" -le 8 ] && [ "$agentic_codex_stale_seconds" -le 31536000 ] || fail "codex_stale_seconds must not exceed 31536000"
+}
+
 sleep_disabled_value() {
-  local value
-  value=$("$agentic_pmset" -g 2>/dev/null | "$agentic_awk" '$1 == "SleepDisabled" { value=$2 } END { if (value == "") value=0; print value }')
+  local raw value
+  raw=$(LC_ALL=C "$agentic_pmset" -g 2>/dev/null) || return 2
+  value=$(printf '%s\n' "$raw" | "$agentic_awk" '$1 == "SleepDisabled" { value=$2 } END { if (value == "") value=0; print value }')
   case "$value" in
     1) printf '1\n' ;;
-    *) printf '0\n' ;;
+    0) printf '0\n' ;;
+    *) return 2 ;;
   esac
 }
 
 validate_host() {
   if [ "${AGENTICMODE_TESTING:-0}" != "1" ]; then
+    [ "$EUID" -ne 0 ] || fail "run agenticmode as your normal user, not with sudo"
     [ "$("$agentic_uname" -s 2>/dev/null)" = "Darwin" ] || fail "this command only supports macOS"
     [ -x "$agentic_pmset" ] || fail "pmset was not found at $agentic_pmset"
     [ -x "$agentic_sudo" ] || fail "sudo was not found at $agentic_sudo"
-    if ! "$agentic_pmset" -g batt 2>/dev/null | "$agentic_grep" -q 'InternalBattery'; then
+    if ! LC_ALL=C "$agentic_pmset" -g batt 2>/dev/null | "$agentic_grep" -q 'InternalBattery'; then
       fail "this command is intended for a Mac laptop with an internal battery"
     fi
   fi
 }
 
-controller_pid() {
-  local pid
-  [ -r "$agentic_pid_file" ] || return 1
-  IFS= read -r pid < "$agentic_pid_file" || return 1
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  printf '%s\n' "$pid"
+validate_watchdog_install() {
+  local helper_owner helper_mode helper_group helper_other helper_parent parent_owner parent_mode parent_group parent_other
+  [ "${AGENTICMODE_TESTING:-0}" != "1" ] || return 0
+  [ -f "$agentic_watchdog_bin" ] && [ -x "$agentic_watchdog_bin" ] || fail "the privileged watchdog is not installed; run ./install.sh from the repository"
+  [ ! -L "$agentic_watchdog_bin" ] || fail "refusing a symlinked privileged watchdog"
+  helper_owner=$("$agentic_stat" -f '%u' "$agentic_watchdog_bin" 2>/dev/null) || fail "cannot inspect the privileged watchdog"
+  [ "$helper_owner" = "0" ] || fail "the privileged watchdog must be owned by root; re-run ./install.sh"
+  helper_mode=$("$agentic_stat" -f '%Lp' "$agentic_watchdog_bin" 2>/dev/null) || fail "cannot inspect privileged watchdog permissions"
+  helper_group=$(printf '%s\n' "$helper_mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  helper_other=$(printf '%s\n' "$helper_mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  case "$helper_group$helper_other" in *2*|*3*|*6*|*7*) fail "the privileged watchdog must not be group- or world-writable" ;; esac
+  helper_parent=${agentic_watchdog_bin%/*}
+  parent_owner=$("$agentic_stat" -f '%u' "$helper_parent" 2>/dev/null) || fail "cannot inspect the watchdog directory"
+  parent_mode=$("$agentic_stat" -f '%Lp' "$helper_parent" 2>/dev/null) || fail "cannot inspect watchdog directory permissions"
+  parent_group=$(printf '%s\n' "$parent_mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  parent_other=$(printf '%s\n' "$parent_mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  [ "$parent_owner" = "0" ] || fail "the watchdog directory must be owned by root"
+  case "$parent_group$parent_other" in *2*|*3*|*6*|*7*) fail "the watchdog directory must not be group- or world-writable" ;; esac
 }
 
-controller_is_live() {
-  local pid command_line
-  pid=$(controller_pid) || return 1
+bundled_watchdog_path() {
+  local resolved="$0" link attempts=0 source_dir
+  while [ -L "$resolved" ] && [ "$attempts" -lt 10 ]; do
+    link=$(/usr/bin/readlink "$resolved") || return 1
+    case "$link" in
+      /*) resolved="$link" ;;
+      *) resolved="$(dirname "$resolved")/$link" ;;
+    esac
+    attempts=$((attempts + 1))
+  done
+  source_dir=$(CDPATH= cd -- "$(dirname -- "$resolved")" && pwd) || return 1
+  printf '%s/../libexec/agenticmode-watchdog\n' "$source_dir"
+}
+
+ensure_watchdog_install() {
+  local bundled owner mode group_digit other_digit
+  [ ! -L "$agentic_watchdog_bin" ] || fail "refusing a symlinked privileged watchdog"
+  if [ -f "$agentic_watchdog_bin" ]; then
+    validate_watchdog_install
+    return 0
+  fi
+  [ "${AGENTICMODE_TESTING:-0}" != "1" ] || return 0
+  bundled=$(bundled_watchdog_path) || fail "could not locate the bundled safety watchdog"
+  [ -f "$bundled" ] && [ -x "$bundled" ] && [ ! -L "$bundled" ] || fail "the bundled safety watchdog is missing or unsafe; re-run ./install.sh"
+  owner=$("$agentic_stat" -f '%u' "$bundled" 2>/dev/null) || fail "cannot inspect the bundled safety watchdog"
+  [ "$owner" = "$UID" ] || fail "the bundled safety watchdog must be owned by your user"
+  mode=$("$agentic_stat" -f '%Lp' "$bundled" 2>/dev/null) || fail "cannot inspect bundled watchdog permissions"
+  group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  case "$group_digit$other_digit" in *2*|*3*|*6*|*7*) fail "the bundled safety watchdog must not be group- or world-writable" ;; esac
+  say "Installing the root-owned safety watchdog. macOS may ask for your password."
+  "$agentic_sudo" -v || fail "administrator authentication failed"
+  "$agentic_sudo" /usr/bin/install -o root -g wheel -m 755 "$bundled" "$agentic_watchdog_bin" || fail "could not install the safety watchdog"
+  validate_watchdog_install
+}
+
+validate_state_root() {
+  local owner
+  if [ -L "$agentic_state_root" ]; then
+    fail "refusing symlinked state directory: $agentic_state_root"
+  fi
+  umask 077
+  mkdir -p "$agentic_state_root" || fail "cannot create state directory: $agentic_state_root"
+  [ -d "$agentic_state_root" ] || fail "state path is not a directory: $agentic_state_root"
+  owner=$("$agentic_stat" -f '%u' "$agentic_state_root" 2>/dev/null) || fail "cannot inspect state directory"
+  [ "$owner" = "$UID" ] || fail "state directory must be owned by your user"
+  chmod 700 "$agentic_state_root" || fail "cannot secure state directory"
+}
+
+process_started_value() {
+  LC_ALL=C "$agentic_ps" -p "$1" -o lstart= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+read_numeric_file() {
+  local file="$1" value
+  [ -r "$file" ] || return 1
+  IFS= read -r value < "$file" || return 1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+controller_identity_matches() {
+  local pid expected_started actual_started command_line state
+  pid=$(read_numeric_file "$agentic_pid_file") || return 1
+  [ -r "$agentic_pid_started_file" ] || return 1
+  IFS= read -r expected_started < "$agentic_pid_started_file" || return 1
   kill -0 "$pid" 2>/dev/null || return 1
+  state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+  [ -n "$state" ] && [ "$state" != "Z" ] || return 1
+  actual_started=$(process_started_value "$pid")
+  [ -n "$actual_started" ] && [ "$actual_started" = "$expected_started" ] || return 1
   command_line=$("$agentic_ps" -p "$pid" -o command= 2>/dev/null || true)
-  case "$command_line" in
-    *agenticmode*) return 0 ;;
+  case "$command_line" in *agenticmode*) return 0 ;; *) return 1 ;; esac
+}
+
+watchdog_stop_path_is_valid() {
+  local path="$1" relative lease_name
+  case "$path" in
+    "$agentic_watchdog_leases_dir"/*/stop) ;;
     *) return 1 ;;
   esac
+  relative=${path#"$agentic_watchdog_leases_dir"/}
+  lease_name=${relative%/stop}
+  case "$lease_name" in
+    lease-*|retired-*) ;;
+    *) return 1 ;;
+  esac
+  case "$lease_name" in
+    *[!A-Za-z0-9._-]*|'') return 1 ;;
+  esac
+  [ "${relative#*/}" = "stop" ]
+}
+
+load_watchdog_stop_path() {
+  local path
+  if [ -e "$agentic_watchdog_stop_path_file" ]; then
+    [ -f "$agentic_watchdog_stop_path_file" ] && [ ! -L "$agentic_watchdog_stop_path_file" ] || return 1
+    IFS= read -r path < "$agentic_watchdog_stop_path_file" || return 1
+    watchdog_stop_path_is_valid "$path" || return 1
+    agentic_stop_file="$path"
+  else
+    agentic_stop_file="$agentic_legacy_stop_file"
+  fi
+}
+
+prepare_watchdog_lease() {
+  local lease_dir temporary attempts=0
+  [ ! -L "$agentic_watchdog_leases_dir" ] || fail "refusing a symlinked watchdog lease directory"
+  mkdir -p "$agentic_watchdog_leases_dir" || fail "could not create the watchdog lease directory"
+  chmod 700 "$agentic_watchdog_leases_dir" || fail "could not secure the watchdog lease directory"
+  while :; do
+    lease_dir="${agentic_watchdog_leases_dir}/lease-$$-${RANDOM:-0}-$attempts"
+    mkdir "$lease_dir" 2>/dev/null && break
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 20 ] || fail "could not allocate a watchdog lease"
+  done
+  chmod 700 "$lease_dir" || { rmdir "$lease_dir" 2>/dev/null || true; fail "could not secure the watchdog lease"; }
+  agentic_stop_file="$lease_dir/stop"
+  temporary="${agentic_watchdog_stop_path_file}.$$"
+  printf '%s\n' "$agentic_stop_file" > "$temporary" || { rmdir "$lease_dir" 2>/dev/null || true; fail "could not publish the watchdog lease"; }
+  mv "$temporary" "$agentic_watchdog_stop_path_file" || { rm -f "$temporary"; rmdir "$lease_dir" 2>/dev/null || true; fail "could not publish the watchdog lease"; }
+}
+
+request_watchdog_stop() {
+  load_watchdog_stop_path || return 1
+  if [ "$agentic_stop_file" != "$agentic_legacy_stop_file" ]; then
+    [ -d "${agentic_stop_file%/stop}" ] && [ ! -L "${agentic_stop_file%/stop}" ] || return 1
+  fi
+  if [ -e "$agentic_stop_file" ] || [ -L "$agentic_stop_file" ]; then
+    [ -f "$agentic_stop_file" ] && [ ! -L "$agentic_stop_file" ] || return 1
+  else
+    (set -C; : > "$agentic_stop_file") 2>/dev/null || return 1
+  fi
+}
+
+retire_watchdog_lease() {
+  local lease_dir gate_file
+  load_watchdog_stop_path || return 1
+  if [ "$agentic_stop_file" = "$agentic_legacy_stop_file" ]; then
+    rm -f "$agentic_stop_file"
+    return 0
+  fi
+  lease_dir=${agentic_stop_file%/stop}
+  gate_file="$lease_dir/ready"
+  watchdog_stop_path_is_valid "$agentic_stop_file" || return 1
+  [ -d "$lease_dir" ] && [ ! -L "$lease_dir" ] || return 1
+  rm -f "$agentic_stop_file" "$gate_file"
+  rmdir "$lease_dir" 2>/dev/null || return 1
+}
+
+clear_state_files() {
+  rm -f "$agentic_pid_file" "$agentic_pid_started_file" "$agentic_watchdog_pid_file" "$agentic_watchdog_started_file" \
+    "$agentic_baseline_file" "$agentic_mode_file" "$agentic_started_file" \
+    "$agentic_started_epoch_file" "$agentic_deadline_file" "$agentic_targets_file" \
+    "$agentic_watchdog_stop_path_file" "$agentic_legacy_stop_file"
+  if [ -d "$agentic_offsets_dir" ] && [ ! -L "$agentic_offsets_dir" ]; then
+    rm -f "$agentic_offsets_dir"/*
+    rmdir "$agentic_offsets_dir" 2>/dev/null || true
+  fi
 }
 
 clear_stale_controller() {
-  rm -f "$agentic_pid_file" "$agentic_mode_file" "$agentic_started_file" \
-    "$agentic_targets_file" "$agentic_stop_file"
+  clear_state_files
+  rm -f "$agentic_lock_pid_file" "$agentic_lock_started_file"
   rmdir "$agentic_lock_dir" 2>/dev/null || true
+}
+
+acquire_operation_lock() {
+  local lock_status=0 lock_owner
+  validate_state_root
+  [ "$agentic_owns_operation" -eq 0 ] || return 0
+  [ -x "$agentic_lockf" ] || fail "macOS lockf was not found at $agentic_lockf"
+  if [ -e "$agentic_operation_file" ] || [ -L "$agentic_operation_file" ]; then
+    [ -f "$agentic_operation_file" ] && [ ! -L "$agentic_operation_file" ] || fail "the state lock must be a regular file"
+    lock_owner=$("$agentic_stat" -f '%u' "$agentic_operation_file" 2>/dev/null) || fail "could not inspect the state lock"
+    [ "$lock_owner" = "$UID" ] || fail "the state lock must be owned by your user"
+  fi
+  exec 9>"$agentic_operation_file" || fail "could not open the state lock"
+  "$agentic_lockf" -s -t 20 9 || lock_status=$?
+  if [ "$lock_status" -ne 0 ]; then
+    exec 9>&-
+    fail "another agenticmode state update is still in progress"
+  fi
+  agentic_owns_operation=1
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_OPERATION_LOCK_READY_FILE:-}" ]; then
+    : > "$AGENTICMODE_TEST_OPERATION_LOCK_READY_FILE"
+  fi
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_OPERATION_LOCK_DELAY:-}" ]; then
+    "$agentic_sleep" "$AGENTICMODE_TEST_OPERATION_LOCK_DELAY"
+  fi
+}
+
+release_operation_lock() {
+  [ "$agentic_owns_operation" -eq 1 ] || return 0
+  exec 9>&-
+  agentic_owns_operation=0
+}
+
+watchdog_identity_matches() {
+  local pid expected actual state
+  pid=$(read_numeric_file "$agentic_watchdog_pid_file") || return 1
+  [ -r "$agentic_watchdog_started_file" ] || return 1
+  IFS= read -r expected < "$agentic_watchdog_started_file" || return 1
+  state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+  [ -n "$state" ] && [ "$state" != "Z" ] || return 1
+  actual=$(process_started_value "$pid")
+  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
+drain_existing_watchdog() {
+  local baseline state attempts=0 registered=0
+  load_watchdog_stop_path || return 1
+  baseline=$(cat "$agentic_baseline_file" 2>/dev/null || true)
+  case "$baseline" in
+    0|1) ;;
+    *) retire_watchdog_lease 2>/dev/null || true; return 0 ;;
+  esac
+  request_watchdog_stop || return 1
+  watchdog_identity_matches && registered=1
+  if [ "$registered" -eq 1 ]; then
+    while watchdog_identity_matches && [ "$attempts" -lt 100 ]; do
+      attempts=$((attempts + 1))
+      "$agentic_sleep" 0.1
+    done
+    watchdog_identity_matches && return 1
+  else
+    # A helper without published identity cannot pass its registration gate.
+    # Keep this lease stopped permanently and allow it time to observe the
+    # stop request and exit without touching pmset.
+    while [ "$attempts" -lt 50 ]; do
+      attempts=$((attempts + 1))
+      "$agentic_sleep" 0.1
+    done
+  fi
+  state=$(sleep_disabled_value 2>/dev/null || printf 'error')
+  [ "$state" = "$baseline" ] || return 1
+  [ "$registered" -eq 0 ] || retire_watchdog_lease
 }
 
 acquire_controller() {
-  umask 077
-  mkdir -p "$agentic_state_root" || fail "cannot create state directory $agentic_state_root"
-  chmod 700 "$agentic_state_root" 2>/dev/null || true
-
-  if ! mkdir "$agentic_lock_dir" 2>/dev/null; then
-    if controller_is_live; then
-      local existing_mode existing_pid
-      existing_pid=$(controller_pid)
-      existing_mode=$(cat "$agentic_mode_file" 2>/dev/null || printf 'unknown')
-      say "Already active in $existing_mode mode (controller PID $existing_pid)."
-      exit 0
+  local existing_mode existing_pid started
+  validate_state_root
+  [ ! -L "$agentic_lock_dir" ] || fail "refusing a symlinked controller lock"
+  acquire_operation_lock
+  if controller_identity_matches; then
+    existing_pid=$(read_numeric_file "$agentic_pid_file")
+    existing_mode=$(cat "$agentic_mode_file" 2>/dev/null || printf 'unknown')
+    release_operation_lock || true
+    fail "already active in $existing_mode mode (controller PID $existing_pid); no changes were made"
+  fi
+  if [ -d "$agentic_lock_dir" ] || [ -r "$agentic_watchdog_pid_file" ] || [ -r "$agentic_baseline_file" ] || [ -r "$agentic_watchdog_stop_path_file" ]; then
+    if ! drain_existing_watchdog; then
+      release_operation_lock || true
+      fail "a previous watchdog has not finished restoring sleep; try agenticmode off again"
     fi
     clear_stale_controller
-    mkdir "$agentic_lock_dir" 2>/dev/null || fail "could not acquire the controller lock"
   fi
-
+  prepare_watchdog_lease
+  mkdir "$agentic_lock_dir" 2>/dev/null || { release_operation_lock || true; fail "could not create the controller lock"; }
+  started=$(process_started_value "$$")
+  [ -n "$started" ] || { clear_stale_controller; release_operation_lock || true; fail "could not identify the controller process"; }
+  printf '%s\n' "$$" > "$agentic_lock_pid_file"
+  printf '%s\n' "$started" > "$agentic_lock_started_file"
   printf '%s\n' "$$" > "$agentic_pid_file"
+  cp "$agentic_lock_started_file" "$agentic_pid_started_file"
   agentic_owns_controller=1
+  release_operation_lock || fail "could not release the state lock"
 }
 
 clear_owned_controller() {
-  local recorded_pid
+  local recorded
   [ "$agentic_owns_controller" -eq 1 ] || return 0
-  recorded_pid=$(controller_pid 2>/dev/null || true)
-  [ "$recorded_pid" = "$$" ] || return 0
-  rm -f "$agentic_pid_file" "$agentic_mode_file" "$agentic_started_file" \
-    "$agentic_targets_file" "$agentic_stop_file"
+  recorded=$(read_numeric_file "$agentic_lock_pid_file" 2>/dev/null || true)
+  [ "$recorded" = "$$" ] || return 0
+  clear_state_files
+  rm -f "$agentic_lock_pid_file" "$agentic_lock_started_file"
   rmdir "$agentic_lock_dir" 2>/dev/null || true
 }
 
-enable_sleep_override() {
-  if [ "$(sleep_disabled_value)" = "1" ]; then
-    say "Lid-close sleep is already disabled."
-    return 0
-  fi
+launch_watchdog() {
+  local baseline controller_started watchdog_started attempts state watchdog_state
+  baseline=$(sleep_disabled_value) || fail "could not read the macOS SleepDisabled state"
+  printf '%s\n' "$baseline" > "$agentic_baseline_file"
+  controller_started=$(process_started_value "$$")
+  [ -n "$controller_started" ] || fail "could not identify the controller process"
 
-  say "Enabling lid-closed operation. macOS may ask for your password."
-  "$agentic_sudo" "$agentic_pmset" -a disablesleep 1 || return 1
-  if [ "$(sleep_disabled_value)" != "1" ]; then
-    warn "macOS did not report SleepDisabled = 1"
-    return 1
+  say "Enabling system sleep override. macOS may ask for your password."
+  "$agentic_sudo" -v || fail "administrator authentication failed"
+  "$agentic_sudo" "$agentic_watchdog_bin" "$$" "$controller_started" "$baseline" "$agentic_poll_seconds" "$agentic_stop_file" "${agentic_stop_file%/stop}/ready" &
+  agentic_watchdog_pid=$!
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_WATCHDOG_SPAWNED_FILE:-}" ]; then
+    : > "$AGENTICMODE_TEST_WATCHDOG_SPAWNED_FILE"
   fi
-  say "Lid-close sleep is disabled."
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_WATCHDOG_REGISTRATION_DELAY:-}" ]; then
+    "$agentic_sleep" "$AGENTICMODE_TEST_WATCHDOG_REGISTRATION_DELAY"
+  fi
+  printf '%s\n' "$agentic_watchdog_pid" > "$agentic_watchdog_pid_file"
+  attempts=0
+  watchdog_started=""
+  while [ -z "$watchdog_started" ] && [ "$attempts" -lt 20 ]; do
+    watchdog_started=$(process_started_value "$agentic_watchdog_pid")
+    [ -n "$watchdog_started" ] || "$agentic_sleep" 0.1
+    attempts=$((attempts + 1))
+  done
+  [ -n "$watchdog_started" ] || fail "could not identify the privileged watchdog"
+  printf '%s\n' "$watchdog_started" > "$agentic_watchdog_started_file"
+  : > "${agentic_stop_file%/stop}/ready" || fail "could not release the watchdog registration gate"
+
+  attempts=0
+  while [ "$attempts" -lt 50 ]; do
+    state=$(sleep_disabled_value 2>/dev/null || printf 'error')
+    watchdog_state=$("$agentic_ps" -p "$agentic_watchdog_pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+    if [ "$state" = "1" ] && [ -n "$watchdog_state" ] && [ "$watchdog_state" != "Z" ]; then
+      say "System sleep is disabled, including lid-close sleep."
+      return 0
+    fi
+    [ -n "$watchdog_state" ] && [ "$watchdog_state" != "Z" ] || break
+    attempts=$((attempts + 1))
+    "$agentic_sleep" 0.1
+  done
+  fail "the privileged watchdog could not enable the sleep override"
 }
 
-disable_sleep_override() {
-  if [ "$(sleep_disabled_value)" = "0" ]; then
-    [ "$agentic_cleanup_quiet" -eq 1 ] || say "Normal sleep is already enabled."
+stop_watchdog() {
+  local pid state baseline attempts wait_status=0
+  pid="$agentic_watchdog_pid"
+  if [ -z "$pid" ]; then
+    pid=$(read_numeric_file "$agentic_watchdog_pid_file" 2>/dev/null || true)
+  fi
+  if [ -z "$pid" ]; then
+    retire_watchdog_lease || return 1
     return 0
   fi
+  baseline=$(cat "$agentic_baseline_file" 2>/dev/null || true)
+  case "$baseline" in 0|1) ;; *) return 1 ;; esac
+  request_watchdog_stop || return 1
 
-  [ "$agentic_cleanup_quiet" -eq 1 ] || say "Restoring normal sleep."
-  "$agentic_sudo" "$agentic_pmset" -a disablesleep 0 || return 1
-  if [ "$(sleep_disabled_value)" != "0" ]; then
-    warn "macOS still reports SleepDisabled = 1"
-    return 1
-  fi
-  [ "$agentic_cleanup_quiet" -eq 1 ] || say "Normal lid-close sleep is enabled."
+  attempts=0
+  while watchdog_identity_matches && [ "$attempts" -lt 100 ]; do
+    state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+    [ -n "$state" ] && [ "$state" != "Z" ] || break
+    attempts=$((attempts + 1))
+    "$agentic_sleep" 0.1
+  done
+  watchdog_identity_matches && return 1
+  wait "$pid" 2>/dev/null || wait_status=$?
+  [ "$wait_status" -eq 0 ] || return 1
+  [ "$(sleep_disabled_value 2>/dev/null || printf 'error')" = "$baseline" ] || return 1
+  rm -f "$agentic_watchdog_pid_file" "$agentic_watchdog_started_file"
+  retire_watchdog_lease || return 1
 }
 
 cleanup_controller() {
-  local exit_code=$?
-  trap - EXIT INT TERM HUP
-
-  if [ "$agentic_owns_controller" -eq 1 ]; then
-    agentic_cleanup_quiet=0
-    if ! disable_sleep_override; then
-      warn "automatic cleanup failed; run: agenticmode off"
-      exit_code=1
-    fi
-    clear_owned_controller
+  local exit_code=$? baseline
+  trap - EXIT INT TERM HUP TSTP
+  if [ -n "$agentic_timer_pid" ]; then
+    kill -TERM "$agentic_timer_pid" 2>/dev/null || true
+    kill -CONT "$agentic_timer_pid" 2>/dev/null || true
+    wait "$agentic_timer_pid" 2>/dev/null || true
   fi
+  if [ "$agentic_owns_controller" -eq 1 ]; then
+    if ! stop_watchdog; then
+      warn "the watchdog did not confirm sleep restoration; state was retained for agenticmode off"
+      exit 78
+    fi
+    if [ -n "$agentic_stop_reason" ]; then
+      say "$agentic_stop_reason"
+    fi
+    if [ -r "$agentic_baseline_file" ]; then
+      baseline=$(cat "$agentic_baseline_file")
+      say "Restored the pre-existing SleepDisabled setting to $baseline."
+    fi
+    acquire_operation_lock
+    clear_owned_controller
+    release_operation_lock || true
+  fi
+  [ "$agentic_owns_operation" -eq 0 ] || release_operation_lock || true
   exit "$exit_code"
 }
 
 handle_signal() {
-  local signal_code="$1"
+  local code="$1"
   say ""
-  say "Stopping agenticmode."
-  exit "$signal_code"
+  agentic_stop_reason="Stopping agenticmode and restoring the prior sleep setting."
+  exit "$code"
+}
+
+handle_suspend() {
+  warn "Ctrl+Z ends the awake lease; a wrapped child command may remain stopped"
+  agentic_stop_reason="Agenticmode was suspended. Restoring the prior sleep setting."
+  exit 148
 }
 
 install_controller_traps() {
@@ -186,38 +812,113 @@ install_controller_traps() {
   trap 'handle_signal 130' INT
   trap 'handle_signal 143' TERM
   trap 'handle_signal 129' HUP
+  trap handle_suspend TSTP
+}
+
+controller_sleep() {
+  "$agentic_sleep" "$1" &
+  agentic_timer_pid=$!
+  wait "$agentic_timer_pid" 2>/dev/null || true
+  agentic_timer_pid=""
+}
+
+ensure_watchdog_healthy() {
+  if watchdog_identity_matches; then
+    return 0
+  fi
+  agentic_stop_reason="The privileged watchdog stopped unexpectedly. Checking sleep restoration."
+  warn "the privileged watchdog is not running"
+  return 1
+}
+
+battery_percent() {
+  LC_ALL=C "$agentic_pmset" -g batt 2>/dev/null | "$agentic_sed" -n 's/.*[[:space:]]\([0-9][0-9]*\)%;.*/\1/p' | "$agentic_tail" -n 1
+}
+
+power_source_kind() {
+  local output
+  output=$(LC_ALL=C "$agentic_pmset" -g batt 2>/dev/null) || { printf 'unknown\n'; return; }
+  case "$output" in
+    *"Now drawing from 'Battery Power'"*) printf 'battery\n' ;;
+    *"Now drawing from 'AC Power'"*) printf 'adapter\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+on_battery_power() {
+  [ "$(power_source_kind)" = "battery" ]
 }
 
 power_source_warning() {
-  if "$agentic_pmset" -g batt 2>/dev/null | "$agentic_grep" -q "Now drawing from 'Battery Power'"; then
-    warn "running with the lid closed on battery can drain the battery and create heat"
+  local percent
+  if on_battery_power; then
+    percent=$(battery_percent)
+    warn "running on battery${percent:+ at ${percent}%}; closed-lid work can drain the battery and create heat"
   fi
-  warn "do not put the Mac in a bag while this mode is active"
+  warn "keep the Mac ventilated and never put it in a bag while this mode is active"
+}
+
+check_runtime_limits() {
+  local now started percent source
+  if [ "$agentic_timeout_seconds" -gt 0 ]; then
+    now=$(date +%s)
+    started=$(cat "$agentic_started_epoch_file" 2>/dev/null || printf '0')
+    case "$started" in ''|*[!0-9]*)
+      agentic_stop_reason="Runtime state was invalid. Restoring the prior sleep setting."
+      return 1
+      ;;
+    esac
+    if [ "$((now - started))" -ge "$agentic_timeout_seconds" ]; then
+      agentic_stop_reason="Maximum duration reached. Restoring the prior sleep setting."
+      return 1
+    fi
+  fi
+  if [ "$agentic_min_battery" -gt 0 ]; then
+    source=$(power_source_kind)
+    if [ "$source" = "unknown" ]; then
+      agentic_stop_reason="Battery state could not be read while a minimum was required. Restoring the prior sleep setting."
+      return 1
+    fi
+    if [ "$source" = "battery" ]; then
+      percent=$(battery_percent)
+      case "$percent" in ''|*[!0-9]*)
+        agentic_stop_reason="Battery percentage could not be read while a minimum was required. Restoring the prior sleep setting."
+        return 1
+        ;;
+      esac
+      if [ "$percent" -le "$agentic_min_battery" ]; then
+        agentic_stop_reason="Battery reached ${percent}%. Restoring the prior sleep setting."
+        return 1
+      fi
+    fi
+  fi
+  return 0
 }
 
 start_controller() {
-  local mode="$1"
+  local mode="$1" now
   validate_host
-  acquire_controller
   install_controller_traps
+  acquire_controller
+  ensure_watchdog_install
   printf '%s\n' "$mode" > "$agentic_mode_file"
   date '+%Y-%m-%d %H:%M:%S %z' > "$agentic_started_file"
-  rm -f "$agentic_stop_file"
-  enable_sleep_override || fail "could not disable sleep"
+  now=$(date +%s)
+  printf '%s\n' "$now" > "$agentic_started_epoch_file"
+  if [ "$agentic_timeout_seconds" -gt 0 ]; then
+    printf '%s\n' "$((now + agentic_timeout_seconds))" > "$agentic_deadline_file"
+  else
+    rm -f "$agentic_deadline_file"
+  fi
+  launch_watchdog
   power_source_warning
-}
-
-run_indefinitely() {
-  start_controller "indefinite"
-  say "Agentic mode is on until Ctrl+C or agenticmode off."
-  while [ ! -e "$agentic_stop_file" ]; do
-    "$agentic_sleep" 5
-  done
 }
 
 codex_home_path() {
   if [ -n "${AGENTICMODE_CODEX_HOME:-}" ]; then
     printf '%s\n' "$AGENTICMODE_CODEX_HOME"
+  elif [ -n "$agentic_codex_home" ]; then
+    printf '%s\n' "$agentic_codex_home"
   elif [ -n "${CODEX_HOME:-}" ]; then
     printf '%s\n' "$CODEX_HOME"
   else
@@ -225,25 +926,130 @@ codex_home_path() {
   fi
 }
 
-last_codex_lifecycle_line() {
-  local file="$1"
-  "$agentic_grep" -E '"type":"event_msg","payload":\{"type":"(task_started|task_complete|turn_aborted)"' "$file" 2>/dev/null | "$agentic_tail" -n 1
+codex_excluded_thread_ids() {
+  local current parent database list
+  current="${AGENTICMODE_EXCLUDE_CODEX_THREAD_IDS:-}"
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    if [ -n "$current" ]; then current="$current,$CODEX_THREAD_ID"; else current="$CODEX_THREAD_ID"; fi
+  fi
+  [ -n "$current" ] || return 0
+  case "$current" in *[!A-Za-z0-9,-]*) return 0 ;; esac
+  list="$current"
+  database="$(codex_home_path)/state_5.sqlite"
+  [ -r "$database" ] || database="$(codex_home_path)/../state_5.sqlite"
+  [ -x "$agentic_sqlite" ] && [ -r "$database" ] || { printf '%s\n' "$list"; return; }
+
+  current=${current%%,*}
+  while [ -n "$current" ]; do
+    parent=$("$agentic_sqlite" "$database" "select parent_thread_id from thread_spawn_edges where child_thread_id='$current' limit 1;" 2>/dev/null || true)
+    [ -n "$parent" ] || break
+    list="$list,$parent"
+    current="$parent"
+  done
+  printf '%s\n' "$list"
+}
+
+path_is_excluded_codex_thread() {
+  local file="$1" ids id old_ifs
+  ids=$(codex_excluded_thread_ids)
+  [ -n "$ids" ] || return 1
+  old_ifs=$IFS
+  IFS=','
+  for id in $ids; do
+    case "$file" in *"$id"*) IFS=$old_ifs; return 0 ;; esac
+  done
+  IFS=$old_ifs
+  return 1
+}
+
+encode_path() {
+  printf '%s' "$1" | "$agentic_base64" | tr -d '\n'
+}
+
+decode_path() {
+  printf '%s' "$1" | "$agentic_base64" -D 2>/dev/null
 }
 
 snapshot_active_codex_turns() {
-  local codex_sessions file lifecycle turn_id
+  local codex_sessions events files file encoded excluded now output file_mtime file_birth file_size file_inode
   codex_sessions="$(codex_home_path)/sessions"
   [ -d "$codex_sessions" ] || return 0
+  events=$(mktemp "${TMPDIR:-/tmp}/agenticmode-events.XXXXXX") || return 1
+  files=$(mktemp "${TMPDIR:-/tmp}/agenticmode-files.XXXXXX") || { rm -f "$events"; return 1; }
+  if ! "$agentic_find" "$codex_sessions" -type f -name '*.jsonl' -print0 > "$files" 2>/dev/null; then
+    rm -f "$events" "$files"
+    return 1
+  fi
+  now=$(date +%s)
 
-  while IFS= read -r file; do
-    lifecycle=$(last_codex_lifecycle_line "$file")
-    case "$lifecycle" in
-      *'"type":"task_started"'*)
-        turn_id=$(printf '%s\n' "$lifecycle" | "$agentic_sed" -n 's/.*"turn_id":"\([^"]*\)".*/\1/p')
-        [ -n "$turn_id" ] && printf 'codex|%s|%s\n' "$turn_id" "$file"
-        ;;
-    esac
-  done < <("$agentic_find" "$codex_sessions" -type f -name '*.jsonl' -print 2>/dev/null)
+  while IFS= read -r -d '' file; do
+    encoded=$(encode_path "$file")
+    file_birth=$("$agentic_stat" -f '%B' "$file" 2>/dev/null || printf '0')
+    file_size=$("$agentic_stat" -f '%z' "$file" 2>/dev/null || printf '0')
+    file_inode=$("$agentic_stat" -f '%i' "$file" 2>/dev/null || printf '0')
+    excluded=0
+    path_is_excluded_codex_thread "$file" && excluded=1
+    if ! "$agentic_awk" -v path="$encoded" -v excluded="$excluded" -v birth="$file_birth" -v size="$file_size" -v inode="$file_inode" '
+      index($0, "\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"") ||
+      index($0, "\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"") ||
+      index($0, "\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\"") {
+        timestamp=$0
+        sub(/^\{\"timestamp\":\"/, "", timestamp)
+        sub(/\".*/, "", timestamp)
+        event=$0
+        sub(/.*\"type\":\"event_msg\",\"payload\":\{\"type\":\"/, "", event)
+        sub(/\".*/, "", event)
+        turn=$0
+        sub(/.*\"turn_id\":\"/, "", turn)
+        sub(/\".*/, "", turn)
+        if (turn != "") print timestamp "|" event "|" turn "|" path "|" excluded "|" birth "|" size "|" inode
+      }
+    ' "$file" 2>/dev/null >> "$events"; then
+      rm -f "$events" "$files"
+      return 1
+    fi
+  done < "$files"
+  rm -f "$files"
+
+  output=$("$agentic_awk" -F '|' '
+    function rank(event) { return event == "task_started" ? 1 : 2 }
+    {
+      timestamp=$1; event=$2; turn=$3; path=$4; excluded=$5; birth=$6; size=$7; inode=$8
+      key=path SUBSEP turn
+      if (!(key in file_ts) || timestamp > file_ts[key] || (timestamp == file_ts[key] && rank(event) > rank(file_event[key]))) {
+        file_ts[key]=timestamp; file_event[key]=event
+      }
+      if (!(turn in global_ts) || timestamp > global_ts[turn] || (timestamp == global_ts[turn] && rank(event) > rank(global_event[turn])) || (timestamp == global_ts[turn] && rank(event) == rank(global_event[turn]) && (birth < global_birth[turn] || (birth == global_birth[turn] && path < global_path[turn])))) {
+        global_ts[turn]=timestamp; global_event[turn]=event; global_path[turn]=path; global_birth[turn]=birth; global_size[turn]=size; global_inode[turn]=inode
+      }
+      if (excluded == 1) excluded_file[key]=1
+    }
+    END {
+      for (key in excluded_file) {
+        split(key, parts, SUBSEP)
+        if (file_event[key] == "task_started") excluded_turn[parts[2]]=1
+      }
+      for (turn in global_event) {
+        if (global_event[turn] == "task_started" && !(turn in excluded_turn)) {
+          print "codex|" turn "|" global_path[turn] "|" global_ts[turn] "|" global_size[turn] "|" global_inode[turn]
+        }
+      }
+    }
+  ' "$events")
+  rm -f "$events"
+
+  while IFS='|' read -r kind turn encoded timestamp file_size file_inode; do
+    [ -n "$turn" ] || continue
+    case "$turn" in *[!A-Za-z0-9._-]*) continue ;; esac
+    if [ "$agentic_codex_stale_seconds" -gt 0 ]; then
+      file=$(decode_path "$encoded")
+      file_mtime=$("$agentic_stat" -f '%m' "$file" 2>/dev/null || printf '0')
+      [ "$((now - file_mtime))" -le "$agentic_codex_stale_seconds" ] || continue
+    fi
+    printf 'codex|%s|%s|%s|%s|%s\n' "$turn" "$encoded" "$timestamp" "$file_size" "$file_inode"
+  done <<EOF
+$output
+EOF
 }
 
 ancestor_pid_list() {
@@ -252,10 +1058,7 @@ ancestor_pid_list() {
   ancestors=",$$,"
   while :; do
     parent=$("$agentic_ps" -p "$next" -o ppid= 2>/dev/null | "$agentic_awk" '{print $1}')
-    case "$parent" in
-      ''|0|1) break ;;
-      *[!0-9]*) break ;;
-    esac
+    case "$parent" in ''|0|1|*[!0-9]*) break ;; esac
     ancestors="${ancestors}${parent},"
     next="$parent"
   done
@@ -263,48 +1066,147 @@ ancestor_pid_list() {
 }
 
 snapshot_active_agent_processes() {
-  local ancestors pid process_name started
+  local ancestors pid process_name started all_names custom_names uid ps_output process_output
   ancestors=$(ancestor_pid_list)
+  uid="$UID"
+  all_names="$agentic_process_names"
+  custom_names="$agentic_custom_process_names"
+  if [ -n "$agentic_extra_process_names" ]; then
+    if [ -n "$custom_names" ]; then custom_names="$custom_names,$agentic_extra_process_names"; else custom_names="$agentic_extra_process_names"; fi
+  fi
+  [ -z "$custom_names" ] || all_names="$all_names,$custom_names"
+
+  ps_output=$("$agentic_ps" -axo pid=,uid=,ucomm=,args= 2>/dev/null) || return 1
+  process_output=$(printf '%s\n' "$ps_output" | "$agentic_awk" -v wanted_uid="$uid" -v names="$all_names" -v policy="$agentic_process_policy" -v extras="$custom_names" '
+    function basename(value, result) {
+      result=value
+      sub(/^.*\//, "", result)
+      sub(/\.(js|mjs|cjs)$/, "", result)
+      if (result == "gemini-cli") result="gemini"
+      else if (result == "claude-code") result="claude"
+      else if (result == "aider-chat") result="aider"
+      return result
+    }
+    function wrapper(value) {
+      return value == "node" || value == "python" || value == "python3" || value == "bash" || value == "sh" || value == "zsh" || value == "env" || value == "npx" || value == "npx-cli" || value == "npm-cli" || value == "bunx" || value == "uvx" || value == "mise"
+    }
+    BEGIN {
+      count=split(names, values, ",")
+      for (i=1; i<=count; i++) known[values[i]]=1
+      count=split(extras, values, ",")
+      for (i=1; i<=count; i++) custom[values[i]]=1
+    }
+    {
+      pid=$1; uid=$2; line=$0; executable=basename($3); provider=executable; provider_position=3
+      if (uid != wanted_uid) next
+      if (!(provider in known)) {
+        provider=""
+        candidate=basename($4)
+        if (candidate in known) { provider=candidate; provider_position=4 }
+        else if (wrapper(executable) || wrapper(candidate)) {
+          limit=NF < 10 ? NF : 10
+          for (i=4; i<=limit; i++) {
+            candidate=basename($i)
+            if (wrapper(candidate)) continue
+            if ($i == "-c" || $i == "-e") break
+            if ($i == "-m" && i < limit) {
+              candidate=basename($(i+1))
+              if (candidate in known) { provider=candidate; provider_position=i+1 }
+              break
+            }
+            if (substr($i, 1, 1) == "-") continue
+            if (candidate in known) { provider=candidate; provider_position=i }
+            break
+          }
+        }
+      }
+      if (provider == "" || provider == "codex") next
+      if (line ~ /codex-code-mode-host|[[:space:]]app-server([[:space:]]|$)/) next
+      if (provider in custom) { print pid "|" provider; next }
+      if (policy == "session") { print pid "|" provider; next }
+      for (i=provider_position+1; i<=NF; i++) {
+        token=$i
+        if (token == "--") break
+        if (provider == "claude" && (token == "-p" || token == "--print" || index(token, "--print=") == 1)) { print pid "|" provider; next }
+        if (provider == "gemini" && (token == "-p" || token == "--prompt" || index(token, "--prompt=") == 1)) { print pid "|" provider; next }
+        if (provider == "aider" && (token == "-m" || token == "--message" || index(token, "--message=") == 1)) { print pid "|" provider; next }
+        if (provider == "opencode" && token == "run") { print pid "|" provider; next }
+      }
+    }
+  ') || return 1
 
   while IFS='|' read -r pid process_name; do
     [ -n "$pid" ] || continue
-    case "$ancestors" in
-      *",${pid},"*) continue ;;
-    esac
-    started=$("$agentic_ps" -p "$pid" -o lstart= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$ancestors" in *",${pid},"*) continue ;; esac
+    started=$(process_started_value "$pid")
     [ -n "$started" ] && printf 'process|%s|%s|%s\n' "$pid" "$started" "$process_name"
-  done < <("$agentic_ps" -axo pid=,ucomm=,args= 2>/dev/null | "$agentic_awk" '
-    {
-      pid=$1
-      comm=$2
-      name=comm
-      sub(/^.*\//, "", name)
-      line=$0
-      matched=""
+  done <<EOF
+$process_output
+EOF
+}
 
-      if (name == "codex" || name == "claude" || name == "gemini" || name == "aider" || name == "opencode") {
-        matched=name
-      } else if ((name == "node" || name == "python" || name == "python3") &&
-                 line ~ /(claude-code|@anthropic-ai\/claude|gemini-cli|\/aider[^[:space:]]*|\/opencode[^[:space:]]*|\/codex[^[:space:]]*)/) {
-        matched=name
-      }
+snapshot_explicit_pids() {
+  local old_ifs pid started name
+  [ -n "$agentic_extra_pids" ] || return 0
+  old_ifs=$IFS
+  IFS=','
+  for pid in $agentic_extra_pids; do
+    kill -0 "$pid" 2>/dev/null || { warn "PID $pid is not running and was skipped"; continue; }
+    started=$(process_started_value "$pid")
+    name=$("$agentic_ps" -p "$pid" -o ucomm= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$started" ] && printf 'process|%s|%s|%s\n' "$pid" "$started" "${name:-explicit}"
+  done
+  IFS=$old_ifs
+}
 
-      if (matched != "" && line !~ /[[:space:]]app-server([[:space:]]|$)/ && line !~ /codex-code-mode-host/) {
-        print pid "|" matched
-      }
-    }
-  ')
+snapshot_targets() {
+  [ "$agentic_include_codex" -eq 0 ] || snapshot_active_codex_turns || return 1
+  [ "$agentic_include_processes" -eq 0 ] || snapshot_active_agent_processes || return 1
+  snapshot_explicit_pids || return 1
 }
 
 codex_target_is_active() {
-  local turn_id="$1" file="$2" lifecycle
+  local turn_id="$1" encoded="$2" snapshot_size="$3" snapshot_inode="$4" file lifecycle current_size current_inode start_byte offset_file saved saved_size saved_inode temporary
+  file=$(decode_path "$encoded")
   [ -r "$file" ] || return 1
-  lifecycle=$("$agentic_grep" -F "\"turn_id\":\"${turn_id}\"" "$file" 2>/dev/null | \
+  case "$turn_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  offset_file="$agentic_offsets_dir/$turn_id"
+  if [ -r "$offset_file" ] && [ ! -L "$offset_file" ]; then
+    IFS= read -r saved < "$offset_file" || saved=""
+    case "$saved" in
+      *'|'*)
+        saved_size=${saved%%|*}
+        saved_inode=${saved#*|}
+        case "$saved_size:$saved_inode" in *[!0-9:]*) ;; *) snapshot_size="$saved_size"; snapshot_inode="$saved_inode" ;; esac
+        ;;
+    esac
+  fi
+  case "$snapshot_size:$snapshot_inode" in *[!0-9:]*) snapshot_size=0; snapshot_inode=0 ;; esac
+  current_size=$("$agentic_stat" -f '%z' "$file" 2>/dev/null) || return 1
+  current_inode=$("$agentic_stat" -f '%i' "$file" 2>/dev/null || printf '0')
+  if [ "$current_inode" = "$snapshot_inode" ] && [ "$current_size" -eq "$snapshot_size" ]; then
+    return 0
+  fi
+  if [ "$current_inode" != "$snapshot_inode" ] || [ "$current_size" -lt "$snapshot_size" ]; then
+    start_byte=1
+  else
+    start_byte=$((snapshot_size + 1))
+  fi
+  lifecycle=$("$agentic_tail" -c "+$start_byte" "$file" 2>/dev/null | \
+    "$agentic_grep" -F "\"turn_id\":\"${turn_id}\"" | \
     "$agentic_grep" -E '"type":"event_msg","payload":\{"type":"(task_started|task_complete|turn_aborted)"' | \
     "$agentic_tail" -n 1)
   case "$lifecycle" in
-    *'"type":"task_started"'*) return 0 ;;
-    *) return 1 ;;
+    *'"type":"task_complete"'*|*'"type":"turn_aborted"'*) return 1 ;;
+    *)
+      [ ! -L "$agentic_offsets_dir" ] || return 1
+      mkdir -p "$agentic_offsets_dir" || return 1
+      chmod 700 "$agentic_offsets_dir" || return 1
+      temporary="$offset_file.$$"
+      printf '%s|%s\n' "$current_size" "$current_inode" > "$temporary" || return 1
+      mv "$temporary" "$offset_file" || return 1
+      return 0
+      ;;
   esac
 }
 
@@ -313,53 +1215,43 @@ process_target_is_active() {
   kill -0 "$pid" 2>/dev/null || return 1
   state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
   [ "$state" != "Z" ] || return 1
-  actual_start=$("$agentic_ps" -p "$pid" -o lstart= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  actual_start=$(process_started_value "$pid")
   [ "$actual_start" = "$expected_start" ]
 }
 
 remaining_target_count() {
-  local kind first second rest count
-  count=0
+  local kind first second third fourth fifth count=0
   [ -r "$agentic_targets_file" ] || { printf '0\n'; return; }
-
-  while IFS='|' read -r kind first second rest; do
+  while IFS='|' read -r kind first second third fourth fifth; do
     case "$kind" in
-      codex)
-        if codex_target_is_active "$first" "$second"; then
-          count=$((count + 1))
-        fi
-        ;;
-      process)
-        if process_target_is_active "$first" "$second"; then
-          count=$((count + 1))
-        fi
-        ;;
+      codex) codex_target_is_active "$first" "$second" "$fourth" "$fifth" && count=$((count + 1)) ;;
+      process) process_target_is_active "$first" "$second" && count=$((count + 1)) ;;
     esac
   done < "$agentic_targets_file"
   printf '%s\n' "$count"
 }
 
-run_current() {
-  local codex_count process_count total remaining previous
-  start_controller "current"
+target_count() {
+  "$agentic_awk" 'NF { count++ } END { print count+0 }' "$1"
+}
 
-  : > "$agentic_targets_file"
-  snapshot_active_codex_turns >> "$agentic_targets_file"
-  snapshot_active_agent_processes >> "$agentic_targets_file"
+show_targets_file() {
+  local file="$1" kind first second third fourth fifth decoded label
+  while IFS='|' read -r kind first second third fourth fifth; do
+    case "$kind" in
+      codex)
+        decoded=$(decode_path "$second")
+        label=${decoded##*/}
+        say "Codex turn $first (exact lifecycle, ${label%.jsonl})"
+        ;;
+      process) say "Process $first ($third, exact PID and start time)" ;;
+    esac
+  done < "$file"
+}
 
-  codex_count=$("$agentic_awk" -F '|' '$1 == "codex" { count++ } END { print count+0 }' "$agentic_targets_file")
-  process_count=$("$agentic_awk" -F '|' '$1 == "process" { count++ } END { print count+0 }' "$agentic_targets_file")
-  total=$((codex_count + process_count))
-
-  if [ "$total" -eq 0 ]; then
-    say "No active agent runs were found."
-    return 0
-  fi
-
-  say "Tracking $total current agent run(s): $codex_count Codex turn(s), $process_count agent process(es)."
-  say "Runs started after this snapshot are not included. Press Ctrl+C to stop early."
-  previous="$total"
-
+wait_for_targets() {
+  local remaining previous
+  previous=$(remaining_target_count)
   while [ ! -e "$agentic_stop_file" ]; do
     remaining=$(remaining_target_count)
     if [ "$remaining" -eq 0 ]; then
@@ -370,78 +1262,244 @@ run_current() {
       say "$remaining tracked run(s) still active."
       previous="$remaining"
     fi
-    "$agentic_sleep" 5
+    ensure_watchdog_healthy || return 78
+    check_runtime_limits || return 75
+    controller_sleep "$agentic_poll_seconds"
+  done
+  warn "tracking stopped before all snapshotted runs finished"
+  return 75
+}
+
+make_target_snapshot() {
+  local destination="$1"
+  : > "$destination"
+  snapshot_targets >> "$destination" || fail "agent run detection failed"
+  LC_ALL=C sort -u "$destination" -o "$destination" || fail "could not finalize the target snapshot"
+}
+
+run_indefinitely() {
+  start_controller "indefinite"
+  say "Agentic mode is on until Ctrl+C or agenticmode off."
+  while [ ! -e "$agentic_stop_file" ]; do
+    ensure_watchdog_healthy || return 78
+    check_runtime_limits || return 75
+    controller_sleep "$agentic_poll_seconds"
   done
 }
 
-turn_off() {
-  local pid=""
+run_current() {
+  local mode="${1:-current}" snapshot total
+  snapshot=$(mktemp "${TMPDIR:-/tmp}/agenticmode-targets.XXXXXX") || fail "could not create a target snapshot"
+  make_target_snapshot "$snapshot"
+  total=$(target_count "$snapshot")
+  if [ "$total" -eq 0 ]; then
+    rm -f "$snapshot"
+    say "No active agent runs were found. Power settings were not changed."
+    return 0
+  fi
+
+  start_controller "$mode"
+  mv "$snapshot" "$agentic_targets_file"
+  say "Tracking $total current agent run(s). Runs started later are not included."
+  show_targets_file "$agentic_targets_file"
+  wait_for_targets
+}
+
+run_wait() {
+  [ -n "$agentic_extra_pids" ] || fail "wait requires at least one PID"
+  agentic_include_codex=0
+  agentic_include_processes=0
+  run_current "wait"
+}
+
+run_exact_command() {
+  local child_pid child_state child_started child_name exit_code
+  [ "${#agentic_command_args[@]}" -gt 0 ] || fail "run requires -- followed by a command"
+  start_controller "run"
+  say "Running: ${agentic_command_args[0]}"
+  "${agentic_command_args[@]}" &
+  child_pid=$!
+  child_started=$(process_started_value "$child_pid")
+  child_name=$("$agentic_ps" -p "$child_pid" -o ucomm= 2>/dev/null | "$agentic_sed" 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  printf 'process|%s|%s|%s\n' "$child_pid" "$child_started" "${child_name:-wrapped-command}" > "$agentic_targets_file"
+  while [ ! -e "$agentic_stop_file" ]; do
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      break
+    fi
+    child_state=$("$agentic_ps" -p "$child_pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+    [ "$child_state" != "Z" ] || break
+    if ! check_runtime_limits; then
+      warn "awake lease ended; command PID $child_pid was left running"
+      return 75
+    fi
+    ensure_watchdog_healthy || return 78
+    controller_sleep "$agentic_poll_seconds"
+  done
+  if [ -e "$agentic_stop_file" ]; then
+    warn "agentic mode was turned off; command PID $child_pid was left running"
+    return 75
+  fi
+  wait "$child_pid"
+  exit_code=$?
+  return "$exit_code"
+}
+
+run_detect() {
+  local snapshot total
   validate_host
-  if controller_is_live; then
-    pid=$(controller_pid)
-    : > "$agentic_stop_file" 2>/dev/null || true
-  fi
+  snapshot=$(mktemp "${TMPDIR:-/tmp}/agenticmode-targets.XXXXXX") || fail "could not create a target snapshot"
+  make_target_snapshot "$snapshot"
+  total=$(target_count "$snapshot")
+  say "Detected $total active run(s)."
+  show_targets_file "$snapshot"
+  rm -f "$snapshot"
+}
 
-  disable_sleep_override || fail "could not restore normal sleep"
-
-  if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+turn_off() {
+  local pid attempts=0
+  validate_host
+  validate_state_root
+  acquire_operation_lock
+  if controller_identity_matches; then
+    pid=$(read_numeric_file "$agentic_pid_file")
+    request_watchdog_stop || { release_operation_lock || true; fail "could not signal the active watchdog safely"; }
     kill -TERM "$pid" 2>/dev/null || true
-    say "Stopped controller PID $pid."
-  elif ! controller_is_live; then
-    clear_stale_controller
+    kill -CONT "$pid" 2>/dev/null || true
+    release_operation_lock || true
+    while controller_identity_matches && [ "$attempts" -lt 120 ]; do
+      attempts=$((attempts + 1))
+      "$agentic_sleep" 0.1
+    done
+    if controller_identity_matches; then
+      fail "the active controller did not stop; try Ctrl+C in its terminal, then run agenticmode off again"
+    fi
+    acquire_operation_lock
   fi
+
+  if ! drain_existing_watchdog; then
+    if watchdog_identity_matches; then
+      release_operation_lock || true
+      fail "the previous watchdog is still running; retry agenticmode off"
+    fi
+    warn "the previous watchdog did not restore its baseline; forcing normal sleep now"
+  fi
+  clear_stale_controller
+
+  say "Restoring normal sleep. macOS may ask for your password."
+  if ! "$agentic_sudo" "$agentic_pmset" -a disablesleep 0 9>&-; then
+    release_operation_lock || true
+    fail "could not restore normal sleep"
+  fi
+  if [ "$(sleep_disabled_value 2>/dev/null || printf 'error')" != "0" ]; then
+    release_operation_lock || true
+    fail "macOS still reports SleepDisabled = 1"
+  fi
+  release_operation_lock || true
+  say "Agenticmode override is off."
 }
 
 show_status() {
-  local sleep_state mode pid started
+  local verbose=0 state mode pid started baseline watchdog deadline
+  [ "${agentic_command_args[0]:-}" != "--verbose" ] || verbose=1
   validate_host
-  sleep_state=$(sleep_disabled_value)
-  if [ "$sleep_state" = "1" ]; then
-    say "macOS sleep: disabled"
-  else
-    say "macOS sleep: normal"
-  fi
+  validate_state_root
+  state=$(sleep_disabled_value) || fail "could not read the macOS SleepDisabled state"
+  say "SleepDisabled: $state"
 
-  if controller_is_live; then
-    pid=$(controller_pid)
+  if controller_identity_matches; then
+    pid=$(read_numeric_file "$agentic_pid_file")
     mode=$(cat "$agentic_mode_file" 2>/dev/null || printf 'unknown')
     started=$(cat "$agentic_started_file" 2>/dev/null || printf 'unknown')
+    baseline=$(cat "$agentic_baseline_file" 2>/dev/null || printf 'unknown')
+    watchdog=$(read_numeric_file "$agentic_watchdog_pid_file" 2>/dev/null || true)
     say "Controller: active"
     say "Mode: $mode"
     say "PID: $pid"
     say "Started: $started"
-    if [ "$mode" = "current" ]; then
+    say "Restore baseline: $baseline"
+    [ -z "$watchdog" ] || say "Watchdog PID: $watchdog"
+    if [ -r "$agentic_deadline_file" ]; then
+      deadline=$(cat "$agentic_deadline_file")
+      say "Deadline epoch: $deadline"
+    fi
+    if [ "$mode" = "current" ] || [ "$mode" = "wait" ] || [ "$mode" = "run" ]; then
       say "Tracked runs remaining: $(remaining_target_count)"
+    fi
+    if [ "$verbose" -eq 1 ] && [ -r "$agentic_targets_file" ]; then
+      show_targets_file "$agentic_targets_file"
+    fi
+    if [ "$state" != "1" ]; then
+      warn "controller is active but the sleep override is off; the watchdog should reassert it"
+      return 2
+    fi
+    if ! watchdog_identity_matches; then
+      warn "controller is active but its privileged watchdog is not healthy"
+      return 2
     fi
   else
     say "Controller: not running"
-    if [ "$sleep_state" = "1" ]; then
-      warn "sleep is disabled without an active controller; run: agenticmode off"
+    if [ "$state" = "1" ]; then
+      warn "SleepDisabled is on without an active controller; run: agenticmode off"
+      return 2
     fi
   fi
 }
 
+show_effective_config() {
+  say "config_file=$agentic_config_file"
+  say "poll_seconds=$agentic_poll_seconds"
+  say "timeout=$agentic_timeout"
+  say "min_battery=$agentic_min_battery"
+  say "include_codex=$agentic_include_codex"
+  say "include_processes=$agentic_include_processes"
+  say "process_policy=$agentic_process_policy"
+  say "process_names=$agentic_process_names"
+  say "custom_process_names=$agentic_custom_process_names"
+  say "codex_stale_seconds=$agentic_codex_stale_seconds"
+  say "codex_home=$(codex_home_path)"
+  say "state_directory=$agentic_state_root"
+  say "watchdog=$agentic_watchdog_bin"
+}
+
+run_doctor() {
+  local state percent
+  validate_host
+  validate_state_root
+  say "agenticmode $AGENTICMODE_VERSION"
+  say "Platform: $("$agentic_uname" -s) $("$agentic_uname" -m)"
+  state=$(sleep_disabled_value) || fail "pmset state query failed"
+  say "SleepDisabled: $state"
+  percent=$(battery_percent)
+  say "Battery: ${percent:-unknown}%"
+  if on_battery_power; then say "Power source: battery"; else say "Power source: adapter"; fi
+  if [ -d "$(codex_home_path)/sessions" ]; then say "Codex lifecycle detector: available"; else say "Codex lifecycle detector: unavailable"; fi
+  if [ -x "$agentic_watchdog_bin" ]; then say "Privileged watchdog: installed"; else say "Privileged watchdog: missing"; fi
+  if controller_identity_matches; then say "Controller identity: healthy"; else say "Controller identity: inactive"; fi
+  show_effective_config
+  run_detect
+}
+
 main() {
   case "${1:-}" in
-    '') run_indefinitely ;;
-    current)
-      [ "$#" -eq 1 ] || fail "current does not accept extra arguments"
-      run_current
-      ;;
-    off)
-      [ "$#" -eq 1 ] || fail "off does not accept extra arguments"
-      turn_off
-      ;;
-    status)
-      [ "$#" -eq 1 ] || fail "status does not accept extra arguments"
-      show_status
-      ;;
-    -h|--help|help) usage ;;
-    -v|--version|version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION" ;;
-    *)
-      usage >&2
-      fail "unknown command: $1"
-      ;;
+    help|-h|--help) usage; exit 0 ;;
+    version|-v|--version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION"; exit 0 ;;
+  esac
+  find_config_argument "$@"
+  case "${1:-}" in off|status) ;; *) load_config ;; esac
+  parse_cli "$@"
+  validate_configuration
+
+  case "$agentic_command" in
+    indefinite) run_indefinitely ;;
+    current) run_current ;;
+    wait) run_wait ;;
+    run) run_exact_command ;;
+    detect) run_detect ;;
+    status) show_status ;;
+    doctor) run_doctor ;;
+    config) show_effective_config ;;
+    off) turn_off ;;
+    *) fail "unknown command: $agentic_command" ;;
   esac
 }
 

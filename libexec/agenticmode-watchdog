@@ -1,0 +1,112 @@
+#!/bin/bash
+
+set -u
+
+pmset_bin=/usr/bin/pmset
+ps_bin=/bin/ps
+sleep_bin=/bin/sleep
+sed_bin=/usr/bin/sed
+awk_bin=/usr/bin/awk
+
+if [ "$EUID" -ne 0 ]; then
+  [ "${AGENTICMODE_TESTING:-0}" = "1" ] || exit 77
+  pmset_bin="${AGENTICMODE_PMSET_BIN:?}"
+  ps_bin="${AGENTICMODE_PS_BIN:-/bin/ps}"
+  sleep_bin="${AGENTICMODE_SLEEP_BIN:-/bin/sleep}"
+  sed_bin="${AGENTICMODE_SED_BIN:-/usr/bin/sed}"
+  awk_bin="${AGENTICMODE_AWK_BIN:-/usr/bin/awk}"
+fi
+
+[ "$#" -eq 6 ] || exit 64
+controller_pid="$1"
+expected_started="$2"
+baseline="$3"
+poll="$4"
+stop_file="$5"
+ready_file="$6"
+interrupted=0
+
+debug_log() {
+  if [ "$EUID" -ne 0 ] && [ -n "${AGENTICMODE_TEST_WATCHDOG_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$AGENTICMODE_TEST_WATCHDOG_LOG"
+  fi
+}
+
+case "$controller_pid:$baseline:$poll" in *[!0-9:]*) exit 64 ;; esac
+case "$baseline" in 0|1) ;; *) exit 64 ;; esac
+[ "$poll" -le 2 ] || poll=2
+
+process_started_value() {
+  LC_ALL=C "$ps_bin" -p "$1" -o lstart= 2>/dev/null | "$sed_bin" 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+sleep_disabled_value() {
+  local raw value
+  raw=$(LC_ALL=C "$pmset_bin" -g 2>/dev/null) || return 2
+  value=$(printf '%s\n' "$raw" | "$awk_bin" '$1 == "SleepDisabled" { value=$2 } END { if (value == "") value=0; print value }')
+  case "$value" in 0|1) printf '%s\n' "$value" ;; *) return 2 ;; esac
+}
+
+restore_sleep_value() {
+  local attempts=0 current
+  while [ "$attempts" -lt 5 ]; do
+    "$pmset_bin" -a disablesleep "$baseline" >/dev/null 2>&1 || true
+    current=$(sleep_disabled_value 2>/dev/null || printf 'error')
+    [ "$current" = "$baseline" ] && return 0
+    attempts=$((attempts + 1))
+    "$sleep_bin" 1
+  done
+  return 1
+}
+
+trap 'interrupted=1' INT TERM HUP
+
+while [ ! -e "$ready_file" ]; do
+  [ ! -e "$stop_file" ] || exit 0
+  kill -0 "$controller_pid" 2>/dev/null || exit 0
+  actual_started=$(process_started_value "$controller_pid")
+  [ -n "$actual_started" ] && [ "$actual_started" = "$expected_started" ] || exit 0
+  "$sleep_bin" 0.1
+done
+
+[ ! -e "$stop_file" ] || exit 0
+kill -0 "$controller_pid" 2>/dev/null || exit 0
+actual_started=$(process_started_value "$controller_pid")
+[ -n "$actual_started" ] && [ "$actual_started" = "$expected_started" ] || exit 0
+
+if [ "$EUID" -ne 0 ] && [ -n "${AGENTICMODE_TEST_WATCHDOG_AFTER_GATE_FILE:-}" ]; then
+  [ -n "${AGENTICMODE_TEST_WATCHDOG_CONTINUE_FILE:-}" ] || exit 64
+  : > "$AGENTICMODE_TEST_WATCHDOG_AFTER_GATE_FILE"
+  while [ ! -e "$AGENTICMODE_TEST_WATCHDOG_CONTINUE_FILE" ]; do "$sleep_bin" 0.1; done
+fi
+
+[ ! -e "$stop_file" ] || exit 0
+kill -0 "$controller_pid" 2>/dev/null || exit 0
+actual_started=$(process_started_value "$controller_pid")
+[ -n "$actual_started" ] && [ "$actual_started" = "$expected_started" ] || exit 0
+
+if ! "$pmset_bin" -a disablesleep 1 >/dev/null 2>&1 || [ "$(sleep_disabled_value 2>/dev/null || printf 'error')" != "1" ]; then
+  restore_sleep_value || true
+  exit 1
+fi
+
+debug_log "start pid=$$ controller=$controller_pid expected=$expected_started stop=$stop_file"
+while [ "$interrupted" -eq 0 ]; do
+  if [ -e "$stop_file" ]; then debug_log "stop file observed"; break; fi
+  if ! kill -0 "$controller_pid" 2>/dev/null; then debug_log "controller missing"; break; fi
+  actual_started=$(process_started_value "$controller_pid")
+  if [ -z "$actual_started" ] || [ "$actual_started" != "$expected_started" ]; then
+    debug_log "controller identity mismatch actual=$actual_started"
+    break
+  fi
+  current=$(sleep_disabled_value 2>/dev/null || printf 'error')
+  if [ "$current" != "1" ]; then
+    "$pmset_bin" -a disablesleep 1 >/dev/null 2>&1 || break
+  fi
+  "$sleep_bin" "$poll"
+done
+
+trap - INT TERM HUP
+if restore_sleep_value; then debug_log "restored baseline=$baseline"; exit 0; fi
+debug_log "restore failed baseline=$baseline"
+exit 1
