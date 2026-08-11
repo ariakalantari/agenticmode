@@ -910,6 +910,29 @@ fi
 assert_contains "previous managed files were restored" "$test_root/update-rollback.log"
 assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
 
+incomplete_rollback_release_base="$test_root/incomplete-rollback-releases"
+mkdir -p "$incomplete_rollback_release_base/latest/download"
+cp "$repo_dir/install.sh" "$release_source/install.sh"
+sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode"
+printf '\nif [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then chmod 500 "$script_dir/bin"; exit 42; fi\n' >> "$release_source/install.sh"
+"$release_source/scripts/package-release.sh" v1.3.3 "$incomplete_rollback_release_base/latest/download" > "$test_root/package-incomplete-rollback-release.log"
+cp "$remote_root/bin/agenticmode" "$test_root/agenticmode-before-incomplete-rollback"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$incomplete_rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-incomplete-rollback.log" 2>&1; then
+  printf 'Update unexpectedly succeeded when rollback was incomplete\n' >&2
+  exit 1
+fi
+assert_contains "rollback was incomplete; reinstall agenticmode before running it again" "$test_root/update-incomplete-rollback.log"
+chmod 755 "$remote_root/bin"
+/usr/bin/install -m 755 "$test_root/agenticmode-before-incomplete-rollback" "$remote_root/bin/agenticmode"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode"
+
 syntax_release_base="$test_root/syntax-releases"
 mkdir -p "$syntax_release_base/latest/download"
 cp "$repo_dir/install.sh" "$release_source/install.sh"

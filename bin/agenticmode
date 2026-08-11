@@ -2155,14 +2155,21 @@ validate_release_archive() {
 }
 
 restore_managed_files() {
-  local root="$1" backup="$2" relative destination temporary mode
+  local root="$1" backup="$2" relative destination temporary mode failed=0
   for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
     destination="$root/$relative"
     temporary="${destination}.rollback.$$"
     case "$relative" in config.example) mode=644 ;; *) mode=755 ;; esac
-    /usr/bin/install -m "$mode" "$backup/$relative" "$temporary" 2>/dev/null || continue
-    /bin/mv -f "$temporary" "$destination" 2>/dev/null || true
+    if ! /usr/bin/install -m "$mode" "$backup/$relative" "$temporary" 2>/dev/null; then
+      failed=1
+      continue
+    fi
+    if ! /bin/mv -f "$temporary" "$destination" 2>/dev/null; then
+      rm -f "$temporary" 2>/dev/null || true
+      failed=1
+    fi
   done
+  [ "$failed" -eq 0 ]
 }
 
 cleanup_update_temporary() {
@@ -2171,7 +2178,7 @@ cleanup_update_temporary() {
 
 run_managed_update() {
   local release_base temporary archive checksum_file checksum actual_checksum extract_root staged backup
-  local new_version_output new_version relative destination replacement mode
+  local new_version_output new_version relative destination replacement mode rollback_message
   case "$agentic_managed_channel" in
     stable) ;;
     pinned:*) fail "this direct install is pinned to ${agentic_managed_channel#pinned:}; reinstall without AGENTICMODE_INSTALL_REF to follow stable releases" ;;
@@ -2233,19 +2240,35 @@ run_managed_update() {
   for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
     destination="$agentic_managed_root/$relative"
     replacement="${destination}.update.$$"
-    [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || { restore_managed_files "$agentic_managed_root" "$backup"; rm -rf "$temporary"; fail "refusing an existing update staging path: $replacement"; }
+    if [ -e "$replacement" ] || [ -L "$replacement" ]; then
+      if restore_managed_files "$agentic_managed_root" "$backup"; then
+        rollback_message="the previous managed files were restored"
+      else
+        rollback_message="rollback was incomplete; reinstall agenticmode before running it again"
+      fi
+      rm -rf "$temporary"
+      fail "refusing an existing update staging path: $replacement; $rollback_message"
+    fi
     case "$relative" in config.example) mode=644 ;; *) mode=755 ;; esac
     if ! /usr/bin/install -m "$mode" "$staged/$relative" "$replacement" || ! /bin/mv -f "$replacement" "$destination"; then
       rm -f "$replacement"
-      restore_managed_files "$agentic_managed_root" "$backup"
+      if restore_managed_files "$agentic_managed_root" "$backup"; then
+        rollback_message="the previous managed files were restored"
+      else
+        rollback_message="rollback was incomplete; reinstall agenticmode before running it again"
+      fi
       rm -rf "$temporary"
-      fail "could not replace the managed install; the previous files were restored"
+      fail "could not replace the managed install; $rollback_message"
     fi
   done
   if ! PREFIX="$agentic_managed_prefix" "$agentic_managed_root/install.sh"; then
-    restore_managed_files "$agentic_managed_root" "$backup"
+    if restore_managed_files "$agentic_managed_root" "$backup"; then
+      rollback_message="the previous managed files were restored"
+    else
+      rollback_message="rollback was incomplete; reinstall agenticmode before running it again"
+    fi
     rm -rf "$temporary"
-    fail "the updated installer failed; the previous managed files were restored"
+    fail "the updated installer failed; $rollback_message"
   fi
   rm -rf "$temporary"
   agentic_update_temporary=""
