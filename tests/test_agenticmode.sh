@@ -106,7 +106,7 @@ assert_equals() {
 assert_contains() {
   pattern="$1"
   file="$2"
-  if ! grep -Fq "$pattern" "$file"; then
+  if ! grep -Fq -- "$pattern" "$file"; then
     printf 'Expected %s to contain: %s\n' "$file" "$pattern" >&2
     sed -n '1,200p' "$file" >&2
     exit 1
@@ -116,11 +116,19 @@ assert_contains() {
 assert_not_contains() {
   pattern="$1"
   file="$2"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     printf 'Expected %s not to contain: %s\n' "$file" "$pattern" >&2
     sed -n '1,200p' "$file" >&2
     exit 1
   fi
+}
+
+assert_occurrences() {
+  expected="$1"
+  pattern="$2"
+  file="$3"
+  actual=$(grep -Fc -- "$pattern" "$file" || true)
+  assert_equals "$expected" "$actual"
 }
 
 wait_for_contains() {
@@ -128,7 +136,7 @@ wait_for_contains() {
   file="$2"
   attempts=0
   while [ "$attempts" -lt 80 ]; do
-    grep -Fq "$pattern" "$file" 2>/dev/null && return 0
+    grep -Fq -- "$pattern" "$file" 2>/dev/null && return 0
     /bin/sleep 0.1
     attempts=$((attempts + 1))
   done
@@ -467,15 +475,15 @@ printf 'Test: lifecycle activities use exact caller exclusion with shared owners
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-exclusion.log" 2>&1
-assert_contains "Detected 1 active run(s)" "$test_root/activity-exclusion.log"
+assert_contains "Detected 1 active run." "$test_root/activity-exclusion.log"
 assert_contains "OpenCode activity session-b" "$test_root/activity-exclusion.log"
 assert_not_contains "OpenCode activity session-a" "$test_root/activity-exclusion.log"
 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-owner-fallback.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-owner-fallback.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-owner-fallback.log"
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --no-activities > "$test_root/activity-disabled.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-disabled.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-disabled.log"
 "$repo_dir/bin/agenticmode" activity stop opencode session-a "$$" generation-a
 "$repo_dir/bin/agenticmode" activity stop opencode session-b "$$" generation-b
 
@@ -492,8 +500,8 @@ wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
-assert_contains "DONE    OpenCode activity session-aba" "$test_root/activity-generation.log"
-assert_contains "All 1 tracked run(s) finished" "$test_root/activity-generation.log"
+assert_contains "ENDED   OpenCode activity session-aba" "$test_root/activity-generation.log"
+assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/activity-generation.log"
 "$repo_dir/bin/agenticmode" activity stop opencode session-aba "$$" generation-old
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
@@ -552,7 +560,7 @@ agent_pids=""
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-dead-owner.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-dead-owner.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-dead-owner.log"
 rm -f "$state_dir/activities/opencode~dead-owner.activity"
 ln -s "$test_root/missing-activity" "$state_dir/activities/opencode~unsafe-link.activity"
 printf '%s\n' 'bad|123|not-base64!' > "$state_dir/activities/opencode~unsafe-mode.activity"
@@ -560,7 +568,7 @@ chmod 644 "$state_dir/activities/opencode~unsafe-mode.activity"
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-unsafe.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-unsafe.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-unsafe.log"
 assert_contains "ignored unsafe or malformed activity marker" "$test_root/activity-unsafe.log"
 rm -f "$state_dir/activities/opencode~unsafe-link.activity" "$state_dir/activities/opencode~unsafe-mode.activity"
 
@@ -577,10 +585,12 @@ printf '%s\n' \
 "$repo_dir/bin/agenticmode" current --no-processes > "$test_root/current.log" 2>&1 &
 controller_pid=$!
 wait_for_value 1 "$pmset_state"
-wait_for_contains "Tracking 2 current agent run(s)" "$test_root/current.log"
+wait_for_contains "Tracking 2 current agent runs" "$test_root/current.log"
 wait_for_contains "WORKING Merge PRs and improve docs" "$test_root/current.log"
 wait_for_contains "WORKING Update version and release notes" "$test_root/current.log"
-wait_for_contains "Progress: 0/2 runs finished (0%)" "$test_root/current.log"
+wait_for_contains "Progress: 2 working - 0/2 no longer active (0% by run count)" "$test_root/current.log"
+assert_not_contains "Codex turn turn-parent" "$test_root/current.log"
+assert_not_contains "Codex turn turn-sub" "$test_root/current.log"
 if LC_ALL=C grep -q $'\033' "$test_root/current.log"; then
   printf 'Codex session title leaked terminal control codes\n' >&2
   exit 1
@@ -589,29 +599,46 @@ printf '%s\n' '{"timestamp":"2026-08-11T00:00:01Z","type":"event_msg","payload":
 wait_for_contains "|" "$state_dir/codex-offsets/turn-parent"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:02Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-later"}}' >> "$parent_fixture"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-parent"}}' >> "$parent_fixture"
-wait_for_contains "Progress: 1/2 runs finished (50%)" "$test_root/current.log"
+wait_for_contains "Progress: 1 working - 1/2 no longer active (50% by run count)" "$test_root/current.log"
 assert_contains "DONE    Merge PRs and improve docs" "$test_root/current.log"
+assert_occurrences 1 "Update version and release notes" "$test_root/current.log"
 "$repo_dir/bin/agenticmode" status --verbose > "$test_root/current-status.log" 2>&1
-assert_contains "Progress: 1/2 runs finished (50%)" "$test_root/current-status.log"
+assert_contains "Progress: 1 working - 1/2 no longer active (50% by run count)" "$test_root/current-status.log"
 assert_contains "DONE    Merge PRs and improve docs" "$test_root/current-status.log"
 assert_contains "WORKING Update version and release notes" "$test_root/current-status.log"
+assert_contains "Codex turn turn-parent - exact lifecycle" "$test_root/current-status.log"
 "$repo_dir/bin/agenticmode" status --machine > "$test_root/current-machine-status.log" 2>&1
+assert_equals "sleep_disabled
+controller
+mode
+controller_pid
+started
+restore_baseline
+watchdog
+watchdog_pid
+tracked_runs_remaining" "$(cut -d= -f1 "$test_root/current-machine-status.log")"
 assert_contains "controller=active" "$test_root/current-machine-status.log"
 assert_contains "tracked_runs_remaining=1" "$test_root/current-machine-status.log"
+if "$repo_dir/bin/agenticmode" status --verbose --machine > "$test_root/status-conflicting-formats.log" 2>&1; then
+  printf 'Conflicting status formats unexpectedly succeeded\n' >&2
+  exit 1
+fi
+assert_contains "--verbose and --machine cannot be combined" "$test_root/status-conflicting-formats.log"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:04Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-sub"}}' >> "$sub_fixture"
 wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
-assert_contains "All 2 tracked run(s) finished" "$test_root/current.log"
-assert_contains "STOPPED Update version and release notes" "$test_root/current.log"
+assert_contains "Tracking complete: all 2 tracked runs are no longer active" "$test_root/current.log"
+assert_contains "ABORTED Update version and release notes" "$test_root/current.log"
+assert_occurrences 2 "Update version and release notes" "$test_root/current.log"
 
 printf 'Test: caller thread exclusion prevents self-deadlock\n'
 clear_codex_fixtures
 self_fixture="$codex_home/sessions/2026/08/11/rollout-thread-self.jsonl"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-self"}}' > "$self_fixture"
 env -u CODEX_THREAD_ID AGENTICMODE_EXCLUDE_CODEX_THREAD_IDS=thread-self "$repo_dir/bin/agenticmode" detect --no-processes > "$test_root/exclusion.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/exclusion.log"
+assert_contains "Detected 0 active runs." "$test_root/exclusion.log"
 clear_codex_fixtures
 
 printf 'Test: exact PID wait mode\n'
@@ -626,7 +653,8 @@ wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
-assert_contains "All 1 tracked run(s) finished" "$test_root/wait.log"
+assert_contains "ENDED   sleep" "$test_root/wait.log"
+assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/wait.log"
 
 printf 'Test: exact command mode preserves exit status\n'
 set +e
@@ -634,6 +662,7 @@ set +e
 run_status=$?
 set -e
 assert_equals 7 "$run_status"
+assert_contains "FAILED  Command exited with status 7" "$test_root/run.log"
 wait_for_value 0 "$pmset_state"
 
 printf 'Test: wrapped command arguments do not become agenticmode config\n'
@@ -755,8 +784,8 @@ wait_for_value 0 "$pmset_state"
 "$repo_dir/bin/agenticmode" off >> "$test_root/off.log" 2>&1
 assert_equals 0 "$(cat "$pmset_state")"
 "$repo_dir/bin/agenticmode" status --machine > "$test_root/inactive-machine-status.log" 2>&1
-assert_contains "sleep_disabled=0" "$test_root/inactive-machine-status.log"
-assert_contains "controller=inactive" "$test_root/inactive-machine-status.log"
+assert_equals "sleep_disabled=0
+controller=inactive" "$(cat "$test_root/inactive-machine-status.log")"
 
 printf 'Test: installer ownership checks and custom-prefix uninstall\n'
 install_prefix="$test_root/prefix with space"

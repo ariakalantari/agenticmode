@@ -70,6 +70,23 @@ Normal completion restores the sleep setting that existed before agenticmode sta
 
 For interactive agents, prefer `run --` when possible. Long-lived TUI processes can remain open between prompts, so process lifetime is not always the same as work lifetime. See [Tracking modes](https://github.com/ariakalantari/agenticmode/wiki/Tracking-Modes) for detection details, supported command shapes, and tradeoffs.
 
+## Terminal status
+
+Long-running commands print compact, aligned status lines. The text label always carries the meaning; color is an optional secondary cue that is enabled only in a terminal. `NO_COLOR` and `TERM=dumb` disable color, while `FORCE_COLOR=1` enables it explicitly.
+
+| Label | Meaning |
+| --- | --- |
+| `WORKING` | The run or operation is still active |
+| `DONE` | Agenticmode observed explicit successful completion |
+| `ABORTED` | Codex explicitly reported an aborted turn |
+| `ENDED` | A process or activity is no longer active, but its result is unknown |
+| `OK` | A health check passed or tracking completed safely |
+| `FAILED` | A wrapped command returned a nonzero status |
+
+`current` shows session titles by default and prints only state changes as work finishes. Exact turn IDs, PIDs, and lifecycle details remain available through `agenticmode status --verbose`.
+
+For automation, `agenticmode status --machine` emits uncolored `key=value` lines. An active controller reports `sleep_disabled`, `controller`, `mode`, `controller_pid`, `started`, `restore_baseline`, `watchdog`, and, when available, `watchdog_pid`, `deadline_epoch`, and `tracked_runs_remaining`. An inactive controller reports only `sleep_disabled` and `controller`. The command exits `0` for a healthy active controller or a safely inactive system, and `2` for an inconsistent or unhealthy state. `--machine` and `--verbose` are mutually exclusive.
+
 ## Common commands
 
 ```bash
