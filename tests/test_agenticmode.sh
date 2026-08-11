@@ -131,6 +131,19 @@ assert_occurrences() {
   assert_equals "$expected" "$actual"
 }
 
+assert_cursor_bounds() {
+  file="$1"
+  maximum_row="$2"
+  maximum_column="$3"
+  if LC_ALL=C tr '\033' '\n' < "$file" | \
+    sed -n 's/^\[\([0-9][0-9]*\);\([0-9][0-9]*\)H.*/\1 \2/p' | \
+    /usr/bin/awk -v rows="$maximum_row" -v columns="$maximum_column" '$1 > rows || $2 > columns { exit 1 }'; then
+    return 0
+  fi
+  printf 'Terminal cursor write exceeded %sx%s in %s\n' "$maximum_column" "$maximum_row" "$file" >&2
+  exit 1
+}
+
 wait_for_contains() {
   pattern="$1"
   file="$2"
@@ -659,6 +672,25 @@ wait_for_value 0 "$pmset_state"
 assert_contains "ENDED   sleep" "$test_root/wait.log"
 assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/wait.log"
 
+printf 'Test: full-screen exact PID wait preserves completion events\n'
+/bin/sleep 2 &
+child_pid=$!
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_TEST_FORCE_TTY=1 \
+  AGENTICMODE_TEST_COLUMNS=80 \
+  AGENTICMODE_TEST_LINES=24 \
+  "$repo_dir/bin/agenticmode" wait "$child_pid" > "$test_root/ui-wait.log" 2>&1 &
+controller_pid=$!
+wait_for_contains $'\033[?1049h' "$test_root/ui-wait.log"
+wait "$child_pid"
+child_pid=""
+wait_for_exit "$controller_pid"
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+assert_contains "ENDED   sleep" "$test_root/ui-wait.log"
+assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/ui-wait.log"
+
 printf 'Test: exact command mode preserves exit status\n'
 set +e
 "$repo_dir/bin/agenticmode" run -- /bin/sh -c 'sleep 1; exit 7' > "$test_root/run.log" 2>&1
@@ -699,15 +731,22 @@ assert_contains "Maximum duration reached" "$test_root/timeout.log"
 assert_not_contains $'\033[?1049h' "$test_root/timeout.log"
 
 printf 'Test: full-screen UI renders, animates, and restores the terminal\n'
+ui_columns_file="$test_root/ui-columns"
+ui_lines_file="$test_root/ui-lines"
+printf '80\n' > "$ui_columns_file"
+printf '24\n' > "$ui_lines_file"
 set +e
 TERM=xterm-256color FORCE_COLOR=1 \
   AGENTICMODE_TEST_FORCE_TTY=1 \
-  AGENTICMODE_TEST_COLUMNS=80 \
-  AGENTICMODE_TEST_LINES=24 \
+  AGENTICMODE_TEST_COLUMNS_FILE="$ui_columns_file" \
+  AGENTICMODE_TEST_LINES_FILE="$ui_lines_file" \
   "$repo_dir/bin/agenticmode" --timeout 2s > "$test_root/full-screen-ui.log" 2>&1 &
 controller_pid=$!
 wait_for_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
+printf '44\n' > "$ui_columns_file"
+printf '14\n' > "$ui_lines_file"
 kill -WINCH "$controller_pid"
+wait_for_contains "+--------------------------------------+" "$test_root/full-screen-ui.log"
 wait "$controller_pid"
 full_screen_status=$?
 controller_pid=""
@@ -717,10 +756,51 @@ wait_for_value 0 "$pmset_state"
 assert_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
 assert_contains $'\033[?2026h' "$test_root/full-screen-ui.log"
 assert_contains "A G E N T I C   M O D E" "$test_root/full-screen-ui.log"
-assert_contains "A W A K E" "$test_root/full-screen-ui.log"
 assert_contains "AWAKE - sleep override active" "$test_root/full-screen-ui.log"
 assert_contains $'\033[?1049l' "$test_root/full-screen-ui.log"
 assert_contains "Maximum duration reached" "$test_root/full-screen-ui.log"
+
+printf 'Test: full-screen UI preserves actual extreme terminal geometry\n'
+for ui_size in 8x5 1000x400; do
+  ui_columns=${ui_size%x*}
+  ui_lines=${ui_size#*x}
+  set +e
+  TERM=xterm-256color NO_COLOR=1 \
+    AGENTICMODE_TEST_FORCE_TTY=1 \
+    AGENTICMODE_TEST_COLUMNS="$ui_columns" \
+    AGENTICMODE_TEST_LINES="$ui_lines" \
+    "$repo_dir/bin/agenticmode" --timeout 2s > "$test_root/ui-${ui_size}.log" 2>&1
+  ui_geometry_status=$?
+  set -e
+  assert_equals 75 "$ui_geometry_status"
+  wait_for_value 0 "$pmset_state"
+  assert_cursor_bounds "$test_root/ui-${ui_size}.log" "$ui_lines" "$ui_columns"
+done
+assert_contains $'\033[190;489H' "$test_root/ui-1000x400.log"
+
+printf 'Test: full-screen UI restores the terminal on controller signals\n'
+for signal_case in TERM:143 HUP:129 TSTP:148; do
+  ui_signal=${signal_case%%:*}
+  ui_expected_status=${signal_case#*:}
+  set +e
+  TERM=xterm-256color NO_COLOR=1 \
+    AGENTICMODE_TEST_FORCE_TTY=1 \
+    AGENTICMODE_TEST_COLUMNS=80 \
+    AGENTICMODE_TEST_LINES=24 \
+    "$repo_dir/bin/agenticmode" --poll 300 > "$test_root/ui-signal-${ui_signal}.log" 2>&1 &
+  controller_pid=$!
+  wait_for_contains $'\033[?1049h' "$test_root/ui-signal-${ui_signal}.log"
+  kill -"$ui_signal" "$controller_pid"
+  wait "$controller_pid"
+  ui_signal_status=$?
+  controller_pid=""
+  set -e
+  assert_equals "$ui_expected_status" "$ui_signal_status"
+  wait_for_value 0 "$pmset_state"
+  assert_contains $'\033[?25l' "$test_root/ui-signal-${ui_signal}.log"
+  assert_contains $'\033[?25h' "$test_root/ui-signal-${ui_signal}.log"
+  assert_contains $'\033[?1049l' "$test_root/ui-signal-${ui_signal}.log"
+done
 
 printf 'Test: plain interactive output respects narrow terminal width\n'
 set +e
