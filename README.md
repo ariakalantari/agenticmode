@@ -2,14 +2,54 @@
 
 `agenticmode` is a dependency-free macOS command line tool that keeps a Mac laptop running with its lid closed while development agents work. It uses the macOS power setting that covers lid-close sleep, adds a privileged safety watchdog, and never directly signals or modifies a tracked agent run.
 
-## Install
+## Install with Homebrew
+
+Homebrew users can install and receive updates without keeping a checkout:
+
+```bash
+brew tap ariakalantari/agenticmode https://github.com/ariakalantari/agenticmode
+brew install ariakalantari/agenticmode/agenticmode
+```
+
+The explicit repository URL is needed because this project doubles as its own tap instead of using a separate `homebrew-agenticmode` repository. Upgrade normally with `brew update && brew upgrade agenticmode`.
+
+Homebrew installs the command without elevated privileges. The first awake-mode run installs the root-owned safety watchdog and asks for an administrator password once.
+
+## Install directly
+
+No package manager is required:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh | /bin/bash
+```
+
+This keeps a small managed copy under `~/.local/share/agenticmode` and adds one `agenticmode` symlink to a writable directory already on `PATH`. To audit before running, download `install.sh`, inspect it, and then run it with `/bin/bash`.
+
+Like the checkout installer, it installs the root-owned safety watchdog and asks for an administrator password once.
+
+The direct installer follows `main` by default. Pin both the script and downloaded files to a release tag or commit when reproducibility matters:
+
+```bash
+ref=YOUR_RELEASE_TAG_OR_COMMIT
+curl -fsSL "https://raw.githubusercontent.com/ariakalantari/agenticmode/$ref/install.sh" |
+  AGENTICMODE_INSTALL_REF="$ref" /bin/bash
+```
+
+Use a specific command prefix or managed-source directory if needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh |
+  PREFIX="$HOME/.local" AGENTICMODE_INSTALL_DIR="$HOME/Library/Application Support/agenticmode" /bin/bash
+```
+
+## Install from a checkout
 
 ```bash
 git clone https://github.com/ariakalantari/agenticmode.git ~/Documents/agenticmode
 ~/Documents/agenticmode/install.sh
 ```
 
-The installer adds one symlink named `agenticmode` to a writable directory already on `PATH`. It also installs a minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`, so macOS asks for an administrator password once during installation. An older symlink-only installation will install this helper on the next active run. On an Apple silicon Mac with Homebrew, the command symlink is normally `/opt/homebrew/bin`.
+The checkout installer adds one symlink named `agenticmode` to a writable directory already on `PATH`. It also installs a minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`, so macOS asks for an administrator password once during installation. An older symlink-only installation will install this helper on the next active run. On an Apple silicon Mac with Homebrew, the command symlink is normally `/opt/homebrew/bin`.
 
 Use a specific prefix if needed:
 
@@ -254,6 +294,25 @@ The suite replaces `pmset` and `sudo` with local fakes. It covers signal cleanup
 Forks and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Changes to `main` require the repository owner's review, and only `@ariakalantari` can merge.
 
 ## Uninstall
+
+For a direct install:
+
+```bash
+~/.local/share/agenticmode/uninstall.sh
+```
+
+Use `$AGENTICMODE_INSTALL_DIR/uninstall.sh` if the managed source directory was customized.
+
+For Homebrew, remove the privileged helper before uninstalling the formula:
+
+```bash
+agenticmode off
+sudo rm -f /Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
+brew uninstall ariakalantari/agenticmode/agenticmode
+brew untap ariakalantari/agenticmode
+```
+
+For a checkout install:
 
 ```bash
 cd ~/Documents/agenticmode

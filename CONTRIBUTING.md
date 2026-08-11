@@ -10,6 +10,18 @@ Forks, bug reports, feature ideas, and pull requests are welcome.
 4. Explain power-management or detection behavior changes in the pull request.
 5. Update the README when user-facing behavior changes.
 
+Packaging changes should also pass:
+
+```bash
+brew style Formula/agenticmode.rb
+brew tap-new --no-git agenticmode/local
+cp Formula/agenticmode.rb "$(brew --repository agenticmode/local)/Formula/agenticmode.rb"
+brew audit --strict agenticmode/local/agenticmode
+brew untap agenticmode/local
+```
+
+The stable Homebrew formula uses an immutable source commit and checksum. When releasing a new version, update its URL, version, checksum, and test expectation together.
+
 Pull requests require review from the repository owner. Only `@ariakalantari` can merge or otherwise update `main`. Contributors can freely open pull requests from forks or branches, but approval does not grant merge access.
 
 ## Safety expectations

@@ -16,3 +16,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run shell tests
         run: ./tests/test_agenticmode.sh
+      - name: Check Homebrew formula
+        run: |
+          brew style Formula/agenticmode.rb
+          brew tap-new --no-git agenticmode/local
+          cp Formula/agenticmode.rb "$(brew --repository agenticmode/local)/Formula/agenticmode.rb"
+          brew audit --strict agenticmode/local/agenticmode
+          brew install --build-from-source agenticmode/local/agenticmode
+          brew test agenticmode/local/agenticmode

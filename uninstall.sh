@@ -5,6 +5,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source_file="$script_dir/bin/agenticmode"
 helper_target=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
+remote_marker="$script_dir/.agenticmode-remote-install"
 removed=0
 status_output=""
 status_code=0
@@ -45,4 +46,27 @@ if [ "${AGENTICMODE_TESTING:-0}" != "1" ] && [ -f "$helper_target" ] && [ ! -L "
   printf 'Removing the root-owned safety watchdog. macOS may ask for your password.\n'
   /usr/bin/sudo /bin/rm "$helper_target"
   printf 'Removed %s\n' "$helper_target"
+fi
+
+if [ -f "$remote_marker" ] && [ ! -L "$remote_marker" ]; then
+  marker_header=$(/usr/bin/sed -n '1p' "$remote_marker" 2>/dev/null || true)
+  marker_root=$(/usr/bin/sed -n '2p' "$remote_marker" 2>/dev/null || true)
+  case "$marker_header" in
+    agenticmode-remote-install:*)
+      [ "$marker_root" = "$script_dir" ] || {
+        printf 'uninstall.sh: managed install marker does not match %s\n' "$script_dir" >&2
+        exit 1
+      }
+      case "$script_dir" in
+        /|"$HOME")
+          printf 'uninstall.sh: refusing unsafe managed install directory: %s\n' "$script_dir" >&2
+          exit 1
+          ;;
+      esac
+      rm -f "$script_dir/bin/agenticmode" "$script_dir/libexec/agenticmode-watchdog" \
+        "$script_dir/config.example" "$remote_marker" "$script_dir/install.sh" "$script_dir/uninstall.sh"
+      rmdir "$script_dir/bin" "$script_dir/libexec" "$script_dir" 2>/dev/null || true
+      printf 'Removed managed install at %s\n' "$script_dir"
+      ;;
+  esac
 fi
