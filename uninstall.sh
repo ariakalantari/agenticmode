@@ -11,10 +11,10 @@ status_output=""
 status_code=0
 
 if [ -x "$source_file" ]; then
-  status_output=$("$source_file" status 2>&1) || status_code=$?
+  status_output=$("$source_file" status --machine 2>&1) || status_code=$?
   case "$status_output" in
-    *'SleepDisabled: 1'*|*'Controller: active'*) "$source_file" off ;;
-    *'SleepDisabled: 0'*) ;;
+    *'sleep_disabled=1'*|*'controller=active'*) "$source_file" off ;;
+    *'sleep_disabled=0'*'controller=inactive'*) ;;
     *)
       printf 'uninstall.sh: could not verify that sleep is safe; refusing to uninstall\n' >&2
       printf '%s\n' "$status_output" >&2

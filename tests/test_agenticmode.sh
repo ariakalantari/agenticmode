@@ -426,21 +426,37 @@ done
 agent_pids="$claude_pid $claude_exe_pid $gemini_pid $aider_pid $opencode_pid $opencode_exe_pid $false_pid"
 /bin/sleep 0.2
 "$repo_dir/bin/agenticmode" detect --no-codex > "$test_root/process-detect.log" 2>&1
-assert_contains "Process $claude_pid (claude" "$test_root/process-detect.log"
-assert_contains "Process $claude_exe_pid (claude" "$test_root/process-detect.log"
-assert_contains "Process $gemini_pid (gemini" "$test_root/process-detect.log"
-assert_contains "Process $aider_pid (aider" "$test_root/process-detect.log"
-assert_contains "Process $opencode_pid (opencode" "$test_root/process-detect.log"
-assert_contains "Process $opencode_exe_pid (opencode" "$test_root/process-detect.log"
+assert_contains "WORKING claude" "$test_root/process-detect.log"
+assert_contains "Process $claude_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "Process $claude_exe_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING gemini" "$test_root/process-detect.log"
+assert_contains "Process $gemini_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING aider" "$test_root/process-detect.log"
+assert_contains "Process $aider_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING opencode" "$test_root/process-detect.log"
+assert_contains "Process $opencode_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "Process $opencode_exe_pid - exact PID and start time" "$test_root/process-detect.log"
 if grep -Fq "Process $false_pid" "$test_root/process-detect.log"; then
   printf 'Process detector matched provider text passed to python -c\n' >&2
+  exit 1
+fi
+if LC_ALL=C grep -q $'\033' "$test_root/process-detect.log"; then
+  printf 'Redirected output unexpectedly contained terminal color codes\n' >&2
+  exit 1
+fi
+env -u NO_COLOR FORCE_COLOR=1 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --pid "$claude_pid" > "$test_root/color.log" 2>&1
+assert_contains $'\033[36mWORKING' "$test_root/color.log"
+NO_COLOR=1 FORCE_COLOR=1 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --pid "$claude_pid" > "$test_root/no-color.log" 2>&1
+if LC_ALL=C grep -q $'\033' "$test_root/no-color.log"; then
+  printf 'NO_COLOR output unexpectedly contained terminal color codes\n' >&2
   exit 1
 fi
 "$agent_bin/myagent" & custom_pid=$!
 agent_pids="$agent_pids $custom_pid"
 /bin/sleep 0.2
 AGENTICMODE_CUSTOM_PROCESS_NAMES=myagent "$repo_dir/bin/agenticmode" detect --no-codex > "$test_root/custom-process.log" 2>&1
-assert_contains "Process $custom_pid (myagent" "$test_root/custom-process.log"
+assert_contains "WORKING myagent" "$test_root/custom-process.log"
+assert_contains "Process $custom_pid - exact PID and start time" "$test_root/custom-process.log"
 for agent_pid in $agent_pids; do kill -TERM "$agent_pid" 2>/dev/null || true; done
 for agent_pid in $agent_pids; do wait "$agent_pid" 2>/dev/null || true; done
 agent_pids=""
@@ -470,12 +486,14 @@ AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   "$repo_dir/bin/agenticmode" current --no-codex --no-processes > "$test_root/activity-generation.log" 2>&1 &
 controller_pid=$!
 wait_for_value 1 "$pmset_state"
-wait_for_contains "OpenCode activity session-aba" "$test_root/activity-generation.log"
+wait_for_contains "WORKING OpenCode activity session-aba" "$test_root/activity-generation.log"
 "$repo_dir/bin/agenticmode" activity start opencode session-aba "$$" generation-new
 wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
+assert_contains "DONE    OpenCode activity session-aba" "$test_root/activity-generation.log"
+assert_contains "All 1 tracked run(s) finished" "$test_root/activity-generation.log"
 "$repo_dir/bin/agenticmode" activity stop opencode session-aba "$$" generation-old
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
@@ -549,6 +567,8 @@ rm -f "$state_dir/activities/opencode~unsafe-link.activity" "$state_dir/activiti
 printf 'Test: current deduplicates Codex copies and ignores later turns\n'
 parent_fixture="$codex_home/sessions/2026/08/11/rollout-parent.jsonl"
 sub_fixture="$codex_home/sessions/2026/08/11/rollout-sub.jsonl"
+/usr/bin/sqlite3 "$codex_home/state_5.sqlite" \
+  "create table threads (rollout_path text primary key, title text not null); insert into threads values ('$parent_fixture', 'Merge PRs and improve docs' || char(27)); insert into threads values ('$sub_fixture', 'Update version and release notes');"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-parent"}}' > "$parent_fixture"
 /bin/sleep 1
 printf '%s\n' \
@@ -558,15 +578,33 @@ printf '%s\n' \
 controller_pid=$!
 wait_for_value 1 "$pmset_state"
 wait_for_contains "Tracking 2 current agent run(s)" "$test_root/current.log"
+wait_for_contains "WORKING Merge PRs and improve docs" "$test_root/current.log"
+wait_for_contains "WORKING Update version and release notes" "$test_root/current.log"
+wait_for_contains "Progress: 0/2 runs finished (0%)" "$test_root/current.log"
+if LC_ALL=C grep -q $'\033' "$test_root/current.log"; then
+  printf 'Codex session title leaked terminal control codes\n' >&2
+  exit 1
+fi
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:01Z","type":"event_msg","payload":{"type":"note"}}' >> "$parent_fixture"
 wait_for_contains "|" "$state_dir/codex-offsets/turn-parent"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:02Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-later"}}' >> "$parent_fixture"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-parent"}}' >> "$parent_fixture"
-printf '%s\n' '{"timestamp":"2026-08-11T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-sub"}}' >> "$sub_fixture"
+wait_for_contains "Progress: 1/2 runs finished (50%)" "$test_root/current.log"
+assert_contains "DONE    Merge PRs and improve docs" "$test_root/current.log"
+"$repo_dir/bin/agenticmode" status --verbose > "$test_root/current-status.log" 2>&1
+assert_contains "Progress: 1/2 runs finished (50%)" "$test_root/current-status.log"
+assert_contains "DONE    Merge PRs and improve docs" "$test_root/current-status.log"
+assert_contains "WORKING Update version and release notes" "$test_root/current-status.log"
+"$repo_dir/bin/agenticmode" status --machine > "$test_root/current-machine-status.log" 2>&1
+assert_contains "controller=active" "$test_root/current-machine-status.log"
+assert_contains "tracked_runs_remaining=1" "$test_root/current-machine-status.log"
+printf '%s\n' '{"timestamp":"2026-08-11T00:00:04Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-sub"}}' >> "$sub_fixture"
 wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
+assert_contains "All 2 tracked run(s) finished" "$test_root/current.log"
+assert_contains "STOPPED Update version and release notes" "$test_root/current.log"
 
 printf 'Test: caller thread exclusion prevents self-deadlock\n'
 clear_codex_fixtures
@@ -588,7 +626,7 @@ wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
-assert_contains "All tracked runs have finished" "$test_root/wait.log"
+assert_contains "All 1 tracked run(s) finished" "$test_root/wait.log"
 
 printf 'Test: exact command mode preserves exit status\n'
 set +e
@@ -716,6 +754,9 @@ controller_pid=""
 wait_for_value 0 "$pmset_state"
 "$repo_dir/bin/agenticmode" off >> "$test_root/off.log" 2>&1
 assert_equals 0 "$(cat "$pmset_state")"
+"$repo_dir/bin/agenticmode" status --machine > "$test_root/inactive-machine-status.log" 2>&1
+assert_contains "sleep_disabled=0" "$test_root/inactive-machine-status.log"
+assert_contains "controller=inactive" "$test_root/inactive-machine-status.log"
 
 printf 'Test: installer ownership checks and custom-prefix uninstall\n'
 install_prefix="$test_root/prefix with space"
