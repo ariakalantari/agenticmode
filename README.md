@@ -27,7 +27,7 @@ Or install directly without a package manager:
 curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh | /bin/bash
 ```
 
-The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Homebrew asks for an administrator password on the first awake-mode run; the direct installer asks once during installation. Both methods install `agenticmode` and `am`, plus a minimal safety watchdog in `/Library/PrivilegedHelperTools`.
+The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Both methods provide `agenticmode` and `am`. The direct installer asks for an administrator password during installation to place the minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`; Homebrew does this on the first awake-mode run.
 
 Every command works with either name. For example, `am current` is equivalent to `agenticmode current`.
 
