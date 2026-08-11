@@ -106,7 +106,7 @@ assert_equals() {
 assert_contains() {
   pattern="$1"
   file="$2"
-  if ! grep -Fq "$pattern" "$file"; then
+  if ! grep -Fq -- "$pattern" "$file"; then
     printf 'Expected %s to contain: %s\n' "$file" "$pattern" >&2
     sed -n '1,200p' "$file" >&2
     exit 1
@@ -116,11 +116,19 @@ assert_contains() {
 assert_not_contains() {
   pattern="$1"
   file="$2"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     printf 'Expected %s not to contain: %s\n' "$file" "$pattern" >&2
     sed -n '1,200p' "$file" >&2
     exit 1
   fi
+}
+
+assert_occurrences() {
+  expected="$1"
+  pattern="$2"
+  file="$3"
+  actual=$(grep -Fc -- "$pattern" "$file" || true)
+  assert_equals "$expected" "$actual"
 }
 
 wait_for_contains() {
@@ -128,7 +136,7 @@ wait_for_contains() {
   file="$2"
   attempts=0
   while [ "$attempts" -lt 80 ]; do
-    grep -Fq "$pattern" "$file" 2>/dev/null && return 0
+    grep -Fq -- "$pattern" "$file" 2>/dev/null && return 0
     /bin/sleep 0.1
     attempts=$((attempts + 1))
   done
@@ -426,21 +434,37 @@ done
 agent_pids="$claude_pid $claude_exe_pid $gemini_pid $aider_pid $opencode_pid $opencode_exe_pid $false_pid"
 /bin/sleep 0.2
 "$repo_dir/bin/agenticmode" detect --no-codex > "$test_root/process-detect.log" 2>&1
-assert_contains "Process $claude_pid (claude" "$test_root/process-detect.log"
-assert_contains "Process $claude_exe_pid (claude" "$test_root/process-detect.log"
-assert_contains "Process $gemini_pid (gemini" "$test_root/process-detect.log"
-assert_contains "Process $aider_pid (aider" "$test_root/process-detect.log"
-assert_contains "Process $opencode_pid (opencode" "$test_root/process-detect.log"
-assert_contains "Process $opencode_exe_pid (opencode" "$test_root/process-detect.log"
+assert_contains "WORKING claude" "$test_root/process-detect.log"
+assert_contains "Process $claude_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "Process $claude_exe_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING gemini" "$test_root/process-detect.log"
+assert_contains "Process $gemini_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING aider" "$test_root/process-detect.log"
+assert_contains "Process $aider_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "WORKING opencode" "$test_root/process-detect.log"
+assert_contains "Process $opencode_pid - exact PID and start time" "$test_root/process-detect.log"
+assert_contains "Process $opencode_exe_pid - exact PID and start time" "$test_root/process-detect.log"
 if grep -Fq "Process $false_pid" "$test_root/process-detect.log"; then
   printf 'Process detector matched provider text passed to python -c\n' >&2
+  exit 1
+fi
+if LC_ALL=C grep -q $'\033' "$test_root/process-detect.log"; then
+  printf 'Redirected output unexpectedly contained terminal color codes\n' >&2
+  exit 1
+fi
+env -u NO_COLOR FORCE_COLOR=1 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --pid "$claude_pid" > "$test_root/color.log" 2>&1
+assert_contains $'\033[36mWORKING' "$test_root/color.log"
+NO_COLOR=1 FORCE_COLOR=1 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --pid "$claude_pid" > "$test_root/no-color.log" 2>&1
+if LC_ALL=C grep -q $'\033' "$test_root/no-color.log"; then
+  printf 'NO_COLOR output unexpectedly contained terminal color codes\n' >&2
   exit 1
 fi
 "$agent_bin/myagent" & custom_pid=$!
 agent_pids="$agent_pids $custom_pid"
 /bin/sleep 0.2
 AGENTICMODE_CUSTOM_PROCESS_NAMES=myagent "$repo_dir/bin/agenticmode" detect --no-codex > "$test_root/custom-process.log" 2>&1
-assert_contains "Process $custom_pid (myagent" "$test_root/custom-process.log"
+assert_contains "WORKING myagent" "$test_root/custom-process.log"
+assert_contains "Process $custom_pid - exact PID and start time" "$test_root/custom-process.log"
 for agent_pid in $agent_pids; do kill -TERM "$agent_pid" 2>/dev/null || true; done
 for agent_pid in $agent_pids; do wait "$agent_pid" 2>/dev/null || true; done
 agent_pids=""
@@ -451,15 +475,15 @@ printf 'Test: lifecycle activities use exact caller exclusion with shared owners
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-exclusion.log" 2>&1
-assert_contains "Detected 1 active run(s)" "$test_root/activity-exclusion.log"
+assert_contains "Detected 1 active run." "$test_root/activity-exclusion.log"
 assert_contains "OpenCode activity session-b" "$test_root/activity-exclusion.log"
 assert_not_contains "OpenCode activity session-a" "$test_root/activity-exclusion.log"
 "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-owner-fallback.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-owner-fallback.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-owner-fallback.log"
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --no-activities > "$test_root/activity-disabled.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-disabled.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-disabled.log"
 "$repo_dir/bin/agenticmode" activity stop opencode session-a "$$" generation-a
 "$repo_dir/bin/agenticmode" activity stop opencode session-b "$$" generation-b
 
@@ -470,12 +494,14 @@ AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   "$repo_dir/bin/agenticmode" current --no-codex --no-processes > "$test_root/activity-generation.log" 2>&1 &
 controller_pid=$!
 wait_for_value 1 "$pmset_state"
-wait_for_contains "OpenCode activity session-aba" "$test_root/activity-generation.log"
+wait_for_contains "WORKING OpenCode activity session-aba" "$test_root/activity-generation.log"
 "$repo_dir/bin/agenticmode" activity start opencode session-aba "$$" generation-new
 wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
+assert_contains "ENDED   OpenCode activity session-aba" "$test_root/activity-generation.log"
+assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/activity-generation.log"
 "$repo_dir/bin/agenticmode" activity stop opencode session-aba "$$" generation-old
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
@@ -534,7 +560,7 @@ agent_pids=""
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-dead-owner.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-dead-owner.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-dead-owner.log"
 rm -f "$state_dir/activities/opencode~dead-owner.activity"
 ln -s "$test_root/missing-activity" "$state_dir/activities/opencode~unsafe-link.activity"
 printf '%s\n' 'bad|123|not-base64!' > "$state_dir/activities/opencode~unsafe-mode.activity"
@@ -542,13 +568,15 @@ chmod 644 "$state_dir/activities/opencode~unsafe-mode.activity"
 AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
   AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
   "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-unsafe.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/activity-unsafe.log"
+assert_contains "Detected 0 active runs." "$test_root/activity-unsafe.log"
 assert_contains "ignored unsafe or malformed activity marker" "$test_root/activity-unsafe.log"
 rm -f "$state_dir/activities/opencode~unsafe-link.activity" "$state_dir/activities/opencode~unsafe-mode.activity"
 
 printf 'Test: current deduplicates Codex copies and ignores later turns\n'
 parent_fixture="$codex_home/sessions/2026/08/11/rollout-parent.jsonl"
 sub_fixture="$codex_home/sessions/2026/08/11/rollout-sub.jsonl"
+/usr/bin/sqlite3 "$codex_home/state_5.sqlite" \
+  "create table threads (rollout_path text primary key, title text not null); insert into threads values ('$parent_fixture', 'Merge PRs and improve docs' || char(27)); insert into threads values ('$sub_fixture', 'Update version and release notes');"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-parent"}}' > "$parent_fixture"
 /bin/sleep 1
 printf '%s\n' \
@@ -557,23 +585,60 @@ printf '%s\n' \
 "$repo_dir/bin/agenticmode" current --no-processes > "$test_root/current.log" 2>&1 &
 controller_pid=$!
 wait_for_value 1 "$pmset_state"
-wait_for_contains "Tracking 2 current agent run(s)" "$test_root/current.log"
+wait_for_contains "Tracking 2 current agent runs" "$test_root/current.log"
+wait_for_contains "WORKING Merge PRs and improve docs" "$test_root/current.log"
+wait_for_contains "WORKING Update version and release notes" "$test_root/current.log"
+wait_for_contains "Progress: 2 working - 0/2 no longer active (0% by run count)" "$test_root/current.log"
+assert_not_contains "Codex turn turn-parent" "$test_root/current.log"
+assert_not_contains "Codex turn turn-sub" "$test_root/current.log"
+if LC_ALL=C grep -q $'\033' "$test_root/current.log"; then
+  printf 'Codex session title leaked terminal control codes\n' >&2
+  exit 1
+fi
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:01Z","type":"event_msg","payload":{"type":"note"}}' >> "$parent_fixture"
 wait_for_contains "|" "$state_dir/codex-offsets/turn-parent"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:02Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-later"}}' >> "$parent_fixture"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-parent"}}' >> "$parent_fixture"
-printf '%s\n' '{"timestamp":"2026-08-11T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-sub"}}' >> "$sub_fixture"
+wait_for_contains "Progress: 1 working - 1/2 no longer active (50% by run count)" "$test_root/current.log"
+assert_contains "DONE    Merge PRs and improve docs" "$test_root/current.log"
+assert_occurrences 1 "Update version and release notes" "$test_root/current.log"
+"$repo_dir/bin/agenticmode" status --verbose > "$test_root/current-status.log" 2>&1
+assert_contains "Progress: 1 working - 1/2 no longer active (50% by run count)" "$test_root/current-status.log"
+assert_contains "DONE    Merge PRs and improve docs" "$test_root/current-status.log"
+assert_contains "WORKING Update version and release notes" "$test_root/current-status.log"
+assert_contains "Codex turn turn-parent - exact lifecycle" "$test_root/current-status.log"
+"$repo_dir/bin/agenticmode" status --machine > "$test_root/current-machine-status.log" 2>&1
+assert_equals "sleep_disabled
+controller
+mode
+controller_pid
+started
+restore_baseline
+watchdog
+watchdog_pid
+tracked_runs_remaining" "$(cut -d= -f1 "$test_root/current-machine-status.log")"
+assert_contains "controller=active" "$test_root/current-machine-status.log"
+assert_contains "tracked_runs_remaining=1" "$test_root/current-machine-status.log"
+if "$repo_dir/bin/agenticmode" status --verbose --machine > "$test_root/status-conflicting-formats.log" 2>&1; then
+  printf 'Conflicting status formats unexpectedly succeeded\n' >&2
+  exit 1
+fi
+assert_contains "--verbose and --machine cannot be combined" "$test_root/status-conflicting-formats.log"
+printf '%s\n' '{"timestamp":"2026-08-11T00:00:04Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-sub"}}' >> "$sub_fixture"
 wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
+assert_contains "Tracking complete: all 2 tracked runs are no longer active" "$test_root/current.log"
+assert_contains "ABORTED Update version and release notes" "$test_root/current.log"
+assert_occurrences 2 "Update version and release notes" "$test_root/current.log"
 
 printf 'Test: caller thread exclusion prevents self-deadlock\n'
 clear_codex_fixtures
 self_fixture="$codex_home/sessions/2026/08/11/rollout-thread-self.jsonl"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-self"}}' > "$self_fixture"
 env -u CODEX_THREAD_ID AGENTICMODE_EXCLUDE_CODEX_THREAD_IDS=thread-self "$repo_dir/bin/agenticmode" detect --no-processes > "$test_root/exclusion.log" 2>&1
-assert_contains "Detected 0 active run(s)" "$test_root/exclusion.log"
+assert_contains "Detected 0 active runs." "$test_root/exclusion.log"
 clear_codex_fixtures
 
 printf 'Test: exact PID wait mode\n'
@@ -588,7 +653,8 @@ wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
-assert_contains "All tracked runs have finished" "$test_root/wait.log"
+assert_contains "ENDED   sleep" "$test_root/wait.log"
+assert_contains "Tracking complete: the tracked run is no longer active" "$test_root/wait.log"
 
 printf 'Test: exact command mode preserves exit status\n'
 set +e
@@ -596,6 +662,7 @@ set +e
 run_status=$?
 set -e
 assert_equals 7 "$run_status"
+assert_contains "FAILED  Command exited with status 7" "$test_root/run.log"
 wait_for_value 0 "$pmset_state"
 
 printf 'Test: wrapped command arguments do not become agenticmode config\n'
@@ -716,6 +783,9 @@ controller_pid=""
 wait_for_value 0 "$pmset_state"
 "$repo_dir/bin/agenticmode" off >> "$test_root/off.log" 2>&1
 assert_equals 0 "$(cat "$pmset_state")"
+"$repo_dir/bin/agenticmode" status --machine > "$test_root/inactive-machine-status.log" 2>&1
+assert_equals "sleep_disabled=0
+controller=inactive" "$(cat "$test_root/inactive-machine-status.log")"
 
 printf 'Test: installer ownership checks and custom-prefix uninstall\n'
 install_prefix="$test_root/prefix with space"

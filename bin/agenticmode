@@ -19,6 +19,7 @@ agentic_stat=/usr/bin/stat
 agentic_base64=/usr/bin/base64
 agentic_sqlite=/usr/bin/sqlite3
 agentic_lockf=/usr/bin/lockf
+agentic_tr=/usr/bin/tr
 if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_pmset="${AGENTICMODE_PMSET_BIN:-$agentic_pmset}"
   agentic_sudo="${AGENTICMODE_SUDO_BIN:-$agentic_sudo}"
@@ -84,6 +85,32 @@ agentic_owns_activities_lock=0
 agentic_watchdog_pid=""
 agentic_timer_pid=""
 agentic_stop_reason=""
+agentic_finished_targets=""
+
+agentic_stdout_reset=""
+agentic_stdout_cyan=""
+agentic_stdout_green=""
+agentic_stdout_blue=""
+agentic_stdout_yellow=""
+agentic_stdout_red=""
+agentic_stderr_reset=""
+agentic_stderr_yellow=""
+agentic_stderr_red=""
+if [ -z "${NO_COLOR:-}" ]; then
+  if { [ -n "${FORCE_COLOR:-}" ] && [ "${FORCE_COLOR:-}" != "0" ]; } || { [ "${TERM:-}" != "dumb" ] && [ -t 1 ]; }; then
+    agentic_stdout_reset=$'\033[0m'
+    agentic_stdout_cyan=$'\033[36m'
+    agentic_stdout_green=$'\033[32m'
+    agentic_stdout_blue=$'\033[34m'
+    agentic_stdout_yellow=$'\033[33m'
+    agentic_stdout_red=$'\033[31m'
+  fi
+  if { [ -n "${FORCE_COLOR:-}" ] && [ "${FORCE_COLOR:-}" != "0" ]; } || { [ "${TERM:-}" != "dumb" ] && [ -t 2 ]; }; then
+    agentic_stderr_reset=$'\033[0m'
+    agentic_stderr_yellow=$'\033[33m'
+    agentic_stderr_red=$'\033[31m'
+  fi
+fi
 
 usage() {
   cat <<'USAGE'
@@ -109,7 +136,7 @@ Usage:
   agenticmode activity stop-owner HARNESS OWNER_PID
       Integration API for publishing active harness work. Does not change power settings.
 
-  agenticmode status [--verbose]
+  agenticmode status [--verbose | --machine]
   agenticmode doctor
   agenticmode config
   agenticmode off
@@ -134,12 +161,57 @@ say() {
   printf '%s\n' "$*"
 }
 
+status_line() {
+  local state="$1" color=""
+  shift
+  case "$state" in
+    WORKING) color="$agentic_stdout_cyan" ;;
+    OK|DONE) color="$agentic_stdout_green" ;;
+    INFO) color="$agentic_stdout_blue" ;;
+    ABORTED|ENDED) color="$agentic_stdout_yellow" ;;
+    FAILED) color="$agentic_stdout_red" ;;
+  esac
+  printf '  %b%-7s%b %s\n' "$color" "$state" "$agentic_stdout_reset" "$*"
+}
+
+status_working() {
+  status_line "WORKING" "$@"
+}
+
+status_done() {
+  status_line "DONE" "$@"
+}
+
+status_ok() {
+  status_line "OK" "$@"
+}
+
+status_info() {
+  status_line "INFO" "$@"
+}
+
+status_aborted() {
+  status_line "ABORTED" "$@"
+}
+
+status_ended() {
+  status_line "ENDED" "$@"
+}
+
+status_failed() {
+  status_line "FAILED" "$@"
+}
+
+status_detail() {
+  printf '          %s\n' "$*"
+}
+
 warn() {
-  printf 'Warning: %s\n' "$*" >&2
+  printf '  %b%-7s%b %s\n' "$agentic_stderr_yellow" "WARN" "$agentic_stderr_reset" "$*" >&2
 }
 
 fail() {
-  printf 'agenticmode: %s\n' "$*" >&2
+  printf '  %b%-7s%b %s\n' "$agentic_stderr_red" "ERROR" "$agentic_stderr_reset" "$*" >&2
   exit 1
 }
 
@@ -344,6 +416,11 @@ parse_cli() {
         agentic_command_args+=("--verbose")
         shift
         ;;
+      --machine)
+        [ "$agentic_command" = "status" ] || fail "--machine is only valid with status"
+        agentic_command_args+=("--machine")
+        shift
+        ;;
       --)
         shift
         agentic_command_args=("$@")
@@ -459,7 +536,7 @@ ensure_watchdog_install() {
   group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
   other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
   case "$group_digit$other_digit" in *2*|*3*|*6*|*7*) fail "the bundled safety watchdog must not be group- or world-writable" ;; esac
-  say "Installing the root-owned safety watchdog. macOS may ask for your password."
+  status_working "Installing the root-owned safety watchdog. macOS may ask for your password."
   "$agentic_sudo" -v || fail "administrator authentication failed"
   "$agentic_sudo" /usr/bin/install -o root -g wheel -m 755 "$bundled" "$agentic_watchdog_bin" || fail "could not install the safety watchdog"
   validate_watchdog_install
@@ -920,7 +997,7 @@ launch_watchdog() {
   controller_started=$(process_started_value "$$")
   [ -n "$controller_started" ] || fail "could not identify the controller process"
 
-  say "Enabling system sleep override. macOS may ask for your password."
+  status_working "Enabling the system sleep override. macOS may ask for your password."
   "$agentic_sudo" -v || fail "administrator authentication failed"
   "$agentic_sudo" "$agentic_watchdog_bin" "$$" "$controller_started" "$baseline" "$agentic_poll_seconds" "$agentic_stop_file" "${agentic_stop_file%/stop}/ready" &
   agentic_watchdog_pid=$!
@@ -947,7 +1024,7 @@ launch_watchdog() {
     state=$(sleep_disabled_value 2>/dev/null || printf 'error')
     watchdog_state=$("$agentic_ps" -p "$agentic_watchdog_pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
     if [ "$state" = "1" ] && [ -n "$watchdog_state" ] && [ "$watchdog_state" != "Z" ]; then
-      say "System sleep is disabled, including lid-close sleep."
+      status_ok "System sleep is disabled, including lid-close sleep."
       return 0
     fi
     [ -n "$watchdog_state" ] && [ "$watchdog_state" != "Z" ] || break
@@ -1000,11 +1077,15 @@ cleanup_controller() {
       exit 78
     fi
     if [ -n "$agentic_stop_reason" ]; then
-      say "$agentic_stop_reason"
+      status_info "$agentic_stop_reason"
     fi
     if [ -r "$agentic_baseline_file" ]; then
       baseline=$(cat "$agentic_baseline_file")
-      say "Restored the pre-existing SleepDisabled setting to $baseline."
+      if [ "$baseline" = "0" ]; then
+        status_ok "Restored normal system sleep."
+      else
+        status_ok "Restored the pre-existing SleepDisabled setting (on)."
+      fi
     fi
     acquire_operation_lock
     clear_owned_controller
@@ -1146,6 +1227,25 @@ codex_home_path() {
   fi
 }
 
+codex_database_path() {
+  local database
+  database="$(codex_home_path)/state_5.sqlite"
+  [ -r "$database" ] || database="$(codex_home_path)/../state_5.sqlite"
+  [ -x "$agentic_sqlite" ] && [ -r "$database" ] || return 1
+  printf '%s\n' "$database"
+}
+
+codex_title_for_path() {
+  local file="$1" database escaped title
+  database=$(codex_database_path 2>/dev/null) || return 1
+  escaped=$(printf '%s' "$file" | "$agentic_sed" "s/'/''/g")
+  title=$("$agentic_sqlite" "$database" \
+    "select replace(replace(title, char(10), ' '), char(13), ' ') from threads where rollout_path='$escaped' and title != '' limit 1;" \
+    2>/dev/null | "$agentic_tr" -d '\000-\010\013\014\016-\037\177') || return 1
+  [ -n "$title" ] || return 1
+  printf '%s\n' "$title"
+}
+
 codex_excluded_thread_ids() {
   local current parent database list
   current="${AGENTICMODE_EXCLUDE_CODEX_THREAD_IDS:-}"
@@ -1155,9 +1255,7 @@ codex_excluded_thread_ids() {
   [ -n "$current" ] || return 0
   case "$current" in *[!A-Za-z0-9,-]*) return 0 ;; esac
   list="$current"
-  database="$(codex_home_path)/state_5.sqlite"
-  [ -r "$database" ] || database="$(codex_home_path)/../state_5.sqlite"
-  [ -x "$agentic_sqlite" ] && [ -r "$database" ] || { printf '%s\n' "$list"; return; }
+  database=$(codex_database_path 2>/dev/null) || { printf '%s\n' "$list"; return; }
 
   current=${current%%,*}
   while [ -n "$current" ]; do
@@ -1491,6 +1589,38 @@ activity_target_is_active() {
   process_target_is_active "$expected_pid" "$owner_started"
 }
 
+codex_target_state() {
+  local turn_id="$1" encoded="$2" snapshot_size="$3" snapshot_inode="$4" file lifecycle
+  if codex_target_is_active "$turn_id" "$encoded" "$snapshot_size" "$snapshot_inode"; then
+    printf 'working\n'
+    return
+  fi
+  file=$(decode_path "$encoded")
+  [ -r "$file" ] || { printf 'ended\n'; return; }
+  lifecycle=$("$agentic_grep" -F "\"turn_id\":\"${turn_id}\"" "$file" 2>/dev/null | \
+    "$agentic_grep" -E '"type":"event_msg","payload":\{"type":"(task_started|task_complete|turn_aborted)"' | \
+    "$agentic_tail" -n 1)
+  case "$lifecycle" in
+    *'"type":"task_complete"'*) printf 'done\n' ;;
+    *'"type":"turn_aborted"'*) printf 'aborted\n' ;;
+    *) printf 'ended\n' ;;
+  esac
+}
+
+target_state() {
+  local kind="$1" first="$2" second="$3" third="$4" fourth="$5" fifth="$6"
+  case "$kind" in
+    codex) codex_target_state "$first" "$second" "$fourth" "$fifth" ;;
+    process)
+      if process_target_is_active "$first" "$second"; then printf 'working\n'; else printf 'ended\n'; fi
+      ;;
+    activity)
+      if activity_target_is_active "$first" "$second" "$third" "$fourth" "$fifth"; then printf 'working\n'; else printf 'ended\n'; fi
+      ;;
+    *) printf 'ended\n' ;;
+  esac
+}
+
 remaining_target_count() {
   local kind first second third fourth fifth count=0
   [ -r "$agentic_targets_file" ] || { printf '0\n'; return; }
@@ -1505,45 +1635,100 @@ remaining_target_count() {
 }
 
 target_count() {
+  [ -r "$1" ] || { printf '0\n'; return; }
   "$agentic_awk" 'NF { count++ } END { print count+0 }' "$1"
 }
 
+show_target_record() {
+  local state="$1" show_details="$2" kind="$3" first="$4" second="$5" third="$6" fourth="$7" fifth="$8"
+  local decoded title label
+  case "$kind" in
+    codex)
+      decoded=$(decode_path "$second")
+      title=$(codex_title_for_path "$decoded" 2>/dev/null || printf 'Codex turn %s' "$first")
+      case "$state" in
+        done) status_done "$title" ;;
+        aborted) status_aborted "$title" ;;
+        ended) status_ended "$title" ;;
+        *) status_working "$title" ;;
+      esac
+      [ "$show_details" -eq 0 ] || status_detail "Codex turn $first - exact lifecycle"
+      ;;
+    process)
+      if [ "$state" = "working" ]; then status_working "$third"; else status_ended "$third"; fi
+      [ "$show_details" -eq 0 ] || status_detail "Process $first - exact PID and start time"
+      ;;
+    activity)
+      case "$first" in opencode) label="OpenCode" ;; *) label="$first" ;; esac
+      if [ "$state" = "working" ]; then status_working "$label activity $second"; else status_ended "$label activity $second"; fi
+      [ "$show_details" -eq 0 ] || status_detail "Generation $third - process $fourth - published lifecycle"
+      ;;
+  esac
+}
+
 show_targets_file() {
-  local file="$1" kind first second third fourth fifth decoded label
+  local file="$1" requested_state="${2:-live}" show_details="${3:-1}"
+  local kind first second third fourth fifth state
   while IFS='|' read -r kind first second third fourth fifth; do
-    case "$kind" in
-      codex)
-        decoded=$(decode_path "$second")
-        label=${decoded##*/}
-        say "Codex turn $first (exact lifecycle, ${label%.jsonl})"
-        ;;
-      process) say "Process $first ($third, exact PID and start time)" ;;
-      activity)
-        case "$first" in opencode) label="OpenCode" ;; *) label="$first" ;; esac
-        say "$label activity $second (published lifecycle, exact generation and process identity)"
-        ;;
-    esac
+    state="$requested_state"
+    [ "$state" != "live" ] || state=$(target_state "$kind" "$first" "$second" "$third" "$fourth" "$fifth")
+    show_target_record "$state" "$show_details" "$kind" "$first" "$second" "$third" "$fourth" "$fifth"
   done < "$file"
 }
 
+show_newly_inactive_targets() {
+  local record kind first second third fourth fifth state
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    IFS='|' read -r kind first second third fourth fifth <<< "$record"
+    state=$(target_state "$kind" "$first" "$second" "$third" "$fourth" "$fifth")
+    [ "$state" != "working" ] || continue
+    printf '%s\n' "$agentic_finished_targets" | "$agentic_grep" -Fqx "$record" && continue
+    show_target_record "$state" 0 "$kind" "$first" "$second" "$third" "$fourth" "$fifth"
+    if [ -z "$agentic_finished_targets" ]; then
+      agentic_finished_targets="$record"
+    else
+      agentic_finished_targets="${agentic_finished_targets}
+${record}"
+    fi
+  done < "$agentic_targets_file"
+}
+
+show_target_progress() {
+  local total="$1" remaining="$2" inactive percent run_label="runs"
+  [ "$total" -gt 0 ] || return 0
+  [ "$total" -ne 1 ] || run_label="run"
+  inactive=$((total - remaining))
+  percent=$((inactive * 100 / total))
+  if [ "$remaining" -eq 0 ]; then
+    if [ "$total" -eq 1 ]; then
+      status_ok "Tracking complete: the tracked run is no longer active."
+    else
+      status_ok "Tracking complete: all $total tracked $run_label are no longer active."
+    fi
+  else
+    status_info "Progress: $remaining working - $inactive/$total no longer active (${percent}% by run count)."
+  fi
+}
+
 wait_for_targets() {
-  local remaining previous
-  previous=$(remaining_target_count)
+  local total remaining previous
+  total=$(target_count "$agentic_targets_file")
+  previous="$total"
   while [ ! -e "$agentic_stop_file" ]; do
     remaining=$(remaining_target_count)
-    if [ "$remaining" -eq 0 ]; then
-      say "All tracked runs have finished."
-      return 0
-    fi
     if [ "$remaining" -ne "$previous" ]; then
-      say "$remaining tracked run(s) still active."
+      say ""
+      show_newly_inactive_targets
+      show_target_progress "$total" "$remaining"
+      [ "$remaining" -ne 0 ] || return 0
       previous="$remaining"
     fi
     ensure_watchdog_healthy || return 78
     check_runtime_limits || return 75
     controller_sleep "$agentic_poll_seconds"
   done
-  warn "tracking stopped before all snapshotted runs finished"
+  warn "tracking stopped before all snapshotted runs became inactive"
   return 75
 }
 
@@ -1556,7 +1741,7 @@ make_target_snapshot() {
 
 run_indefinitely() {
   start_controller "indefinite"
-  say "Agentic mode is on until Ctrl+C or agenticmode off."
+  status_working "Agentic mode is on until Ctrl+C or agenticmode off."
   while [ ! -e "$agentic_stop_file" ]; do
     ensure_watchdog_healthy || return 78
     check_runtime_limits || return 75
@@ -1571,14 +1756,20 @@ run_current() {
   total=$(target_count "$snapshot")
   if [ "$total" -eq 0 ]; then
     rm -f "$snapshot"
-    say "No active agent runs were found. Power settings were not changed."
+    status_info "No active agent runs were found. Power settings were not changed."
     return 0
   fi
 
   start_controller "$mode"
   mv "$snapshot" "$agentic_targets_file"
-  say "Tracking $total current agent run(s). Runs started later are not included."
-  show_targets_file "$agentic_targets_file"
+  agentic_finished_targets=""
+  if [ "$total" -eq 1 ]; then
+    status_info "Tracking 1 current agent run. Runs started later are not included."
+  else
+    status_info "Tracking $total current agent runs. Runs started later are not included."
+  fi
+  show_targets_file "$agentic_targets_file" "working" 0
+  show_target_progress "$total" "$total"
   wait_for_targets
 }
 
@@ -1593,7 +1784,7 @@ run_exact_command() {
   local child_pid child_state child_started child_name exit_code
   [ "${#agentic_command_args[@]}" -gt 0 ] || fail "run requires -- followed by a command"
   start_controller "run"
-  say "Running: ${agentic_command_args[0]}"
+  status_working "Running ${agentic_command_args[0]}"
   "${agentic_command_args[@]}" &
   child_pid=$!
   child_started=$(process_started_value "$child_pid")
@@ -1618,6 +1809,11 @@ run_exact_command() {
   fi
   wait "$child_pid"
   exit_code=$?
+  if [ "$exit_code" -eq 0 ]; then
+    status_done "Command finished successfully."
+  else
+    status_failed "Command exited with status $exit_code."
+  fi
   return "$exit_code"
 }
 
@@ -1627,8 +1823,8 @@ run_detect() {
   snapshot=$(mktemp "${TMPDIR:-/tmp}/agenticmode-targets.XXXXXX") || fail "could not create a target snapshot"
   make_target_snapshot "$snapshot"
   total=$(target_count "$snapshot")
-  say "Detected $total active run(s)."
-  show_targets_file "$snapshot"
+  if [ "$total" -eq 1 ]; then status_info "Detected 1 active run."; else status_info "Detected $total active runs."; fi
+  show_targets_file "$snapshot" "working"
   rm -f "$snapshot"
 }
 
@@ -1662,7 +1858,7 @@ turn_off() {
   fi
   clear_stale_controller
 
-  say "Restoring normal sleep. macOS may ask for your password."
+  status_working "Restoring normal sleep. macOS may ask for your password."
   if ! "$agentic_sudo" "$agentic_pmset" -a disablesleep 0 9>&-; then
     release_operation_lock || true
     fail "could not restore normal sleep"
@@ -1672,16 +1868,21 @@ turn_off() {
     fail "macOS still reports SleepDisabled = 1"
   fi
   release_operation_lock || true
-  say "Agenticmode override is off."
+  status_ok "Agenticmode override is off."
 }
 
 show_status() {
-  local verbose=0 state mode pid started baseline watchdog deadline
-  [ "${agentic_command_args[0]:-}" != "--verbose" ] || verbose=1
+  local verbose=0 machine=0 argument state mode pid started baseline watchdog deadline total remaining watchdog_health
+  for argument in "${agentic_command_args[@]}"; do
+    case "$argument" in
+      --verbose) verbose=1 ;;
+      --machine) machine=1 ;;
+    esac
+  done
+  [ "$verbose" -eq 0 ] || [ "$machine" -eq 0 ] || fail "--verbose and --machine cannot be combined"
   validate_host
   validate_state_root
   state=$(sleep_disabled_value) || fail "could not read the macOS SleepDisabled state"
-  say "SleepDisabled: $state"
 
   if controller_identity_matches; then
     pid=$(read_numeric_file "$agentic_pid_file")
@@ -1689,36 +1890,72 @@ show_status() {
     started=$(cat "$agentic_started_file" 2>/dev/null || printf 'unknown')
     baseline=$(cat "$agentic_baseline_file" 2>/dev/null || printf 'unknown')
     watchdog=$(read_numeric_file "$agentic_watchdog_pid_file" 2>/dev/null || true)
-    say "Controller: active"
-    say "Mode: $mode"
-    say "PID: $pid"
-    say "Started: $started"
-    say "Restore baseline: $baseline"
-    [ -z "$watchdog" ] || say "Watchdog PID: $watchdog"
+    if watchdog_identity_matches; then watchdog_health="healthy"; else watchdog_health="unhealthy"; fi
+    if [ "$machine" -eq 1 ]; then
+      say "sleep_disabled=$state"
+      say "controller=active"
+      say "mode=$mode"
+      say "controller_pid=$pid"
+      say "started=$started"
+      say "restore_baseline=$baseline"
+      say "watchdog=$watchdog_health"
+      [ -z "$watchdog" ] || say "watchdog_pid=$watchdog"
+      if [ -r "$agentic_deadline_file" ]; then say "deadline_epoch=$(cat "$agentic_deadline_file")"; fi
+      if [ "$mode" = "current" ] || [ "$mode" = "wait" ] || [ "$mode" = "run" ]; then
+        say "tracked_runs_remaining=$(remaining_target_count)"
+      fi
+      [ "$state" = "1" ] && [ "$watchdog_health" = "healthy" ] && return 0
+      return 2
+    fi
+
+    say "agenticmode status"
+    if [ "$state" = "1" ]; then
+      status_ok "Sleep override is on."
+    else
+      warn "controller is active but the sleep override is off; the watchdog should reassert it"
+    fi
+    status_working "Controller is active in $mode mode."
+    status_detail "PID $pid - started $started - restore baseline $baseline"
     if [ -r "$agentic_deadline_file" ]; then
       deadline=$(cat "$agentic_deadline_file")
-      say "Deadline epoch: $deadline"
+      status_detail "Deadline epoch $deadline"
+    fi
+    if [ "$watchdog_health" = "healthy" ]; then
+      status_ok "Privileged watchdog is healthy${watchdog:+ (PID $watchdog)}."
+    else
+      warn "controller is active but its privileged watchdog is not healthy"
     fi
     if [ "$mode" = "current" ] || [ "$mode" = "wait" ] || [ "$mode" = "run" ]; then
-      say "Tracked runs remaining: $(remaining_target_count)"
+      total=$(target_count "$agentic_targets_file")
+      remaining=$(remaining_target_count)
+      show_target_progress "$total" "$remaining"
     fi
     if [ "$verbose" -eq 1 ] && [ -r "$agentic_targets_file" ]; then
-      show_targets_file "$agentic_targets_file"
+      say ""
+      status_info "Tracked runs"
+      show_targets_file "$agentic_targets_file" "live"
     fi
     if [ "$state" != "1" ]; then
-      warn "controller is active but the sleep override is off; the watchdog should reassert it"
       return 2
     fi
     if ! watchdog_identity_matches; then
-      warn "controller is active but its privileged watchdog is not healthy"
       return 2
     fi
   else
-    say "Controller: not running"
+    if [ "$machine" -eq 1 ]; then
+      say "sleep_disabled=$state"
+      say "controller=inactive"
+      [ "$state" = "0" ] && return 0
+      return 2
+    fi
+
+    say "agenticmode status"
+    status_info "Controller is not running."
     if [ "$state" = "1" ]; then
       warn "SleepDisabled is on without an active controller; run: agenticmode off"
       return 2
     fi
+    status_ok "Sleep override is off."
   fi
 }
 
@@ -1740,20 +1977,23 @@ show_effective_config() {
 }
 
 run_doctor() {
-  local state percent
+  local state percent source
   validate_host
   validate_state_root
-  say "agenticmode $AGENTICMODE_VERSION"
-  say "Platform: $("$agentic_uname" -s) $("$agentic_uname" -m)"
+  say "agenticmode $AGENTICMODE_VERSION diagnostics"
+  status_ok "Platform: $("$agentic_uname" -s) $("$agentic_uname" -m)"
   state=$(sleep_disabled_value) || fail "pmset state query failed"
-  say "SleepDisabled: $state"
+  if [ "$state" = "1" ]; then status_info "Sleep override is on."; else status_info "Sleep override is off."; fi
   percent=$(battery_percent)
-  say "Battery: ${percent:-unknown}%"
-  if on_battery_power; then say "Power source: battery"; else say "Power source: adapter"; fi
-  if [ -d "$(codex_home_path)/sessions" ]; then say "Codex lifecycle detector: available"; else say "Codex lifecycle detector: unavailable"; fi
-  if [ -x "$agentic_watchdog_bin" ]; then say "Privileged watchdog: installed"; else say "Privileged watchdog: missing"; fi
-  if controller_identity_matches; then say "Controller identity: healthy"; else say "Controller identity: inactive"; fi
+  source=$(power_source_kind)
+  status_info "Power: $source${percent:+ at ${percent}%}."
+  if [ -d "$(codex_home_path)/sessions" ]; then status_ok "Codex lifecycle detector is available."; else warn "Codex lifecycle detector is unavailable"; fi
+  if [ -x "$agentic_watchdog_bin" ]; then status_ok "Privileged watchdog is installed."; else warn "Privileged watchdog is missing"; fi
+  if controller_identity_matches; then status_ok "Controller identity is healthy."; else status_info "Controller is inactive."; fi
+  say ""
+  status_info "Effective configuration"
   show_effective_config
+  say ""
   run_detect
 }
 
