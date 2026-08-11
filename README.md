@@ -91,7 +91,11 @@ For interactive agents, prefer `run --` when possible. Long-lived TUI processes 
 
 ## Terminal status
 
-Long-running commands print compact, aligned status lines. The text label always carries the meaning; color is an optional secondary cue that is enabled only in a terminal. `NO_COLOR` and `TERM=dumb` disable color, while `FORCE_COLOR=1` enables it explicitly.
+Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a centered status panel, elapsed time, tracked-run progress, and an animated laptop. The layout redraws itself after a terminal resize and progressively simplifies in small windows. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
+
+Use `--no-ui` for compact line output, or set `AGENTICMODE_UI=plain` to make that the default. Pipes, redirected output, `TERM=dumb`, and `agenticmode run -- command` always use line output so logs and wrapped-command output remain intact. Interactive line output is capped to a readable measure and wraps with a hanging indent instead of relying on accidental terminal wrapping.
+
+The text label always carries the meaning; color is an optional secondary cue that is enabled only in a terminal. `NO_COLOR` disables color, while `FORCE_COLOR=1` enables it explicitly.
 
 | Label | Meaning |
 | --- | --- |

@@ -26,6 +26,7 @@ agentic_curl=/usr/bin/curl
 agentic_shasum=/usr/bin/shasum
 agentic_tar=/usr/bin/tar
 agentic_cmp=/usr/bin/cmp
+agentic_tput=/usr/bin/tput
 if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_pmset="${AGENTICMODE_PMSET_BIN:-$agentic_pmset}"
   agentic_sudo="${AGENTICMODE_SUDO_BIN:-$agentic_sudo}"
@@ -44,6 +45,7 @@ if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_shasum="${AGENTICMODE_SHASUM_BIN:-$agentic_shasum}"
   agentic_tar="${AGENTICMODE_TAR_BIN:-$agentic_tar}"
   agentic_cmp="${AGENTICMODE_CMP_BIN:-$agentic_cmp}"
+  agentic_tput="${AGENTICMODE_TPUT_BIN:-$agentic_tput}"
 fi
 agentic_watchdog_bin=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
 [ "${AGENTICMODE_TESTING:-0}" != "1" ] || agentic_watchdog_bin="${AGENTICMODE_WATCHDOG_BIN:-$agentic_watchdog_bin}"
@@ -97,6 +99,30 @@ agentic_timer_pid=""
 agentic_stop_reason=""
 agentic_finished_targets=""
 agentic_update_temporary=""
+agentic_ui_preference="${AGENTICMODE_UI:-auto}"
+agentic_ui_active=0
+agentic_ui_resized=0
+agentic_ui_columns=80
+agentic_ui_lines=24
+agentic_ui_frame=0
+agentic_ui_frames_per_second=5
+agentic_ui_elapsed_seconds=0
+agentic_ui_mode=""
+agentic_ui_total=0
+agentic_ui_remaining=0
+agentic_ui_notice_state=""
+agentic_ui_notice=""
+agentic_ui_smcup=""
+agentic_ui_rmcup=""
+agentic_ui_civis=""
+agentic_ui_cnorm=""
+agentic_ui_clear=""
+agentic_ui_bold=""
+agentic_ui_dim=""
+agentic_ui_screen=()
+agentic_ui_screen_style=()
+agentic_ui_previous=()
+agentic_ui_previous_style=()
 
 agentic_stdout_reset=""
 agentic_stdout_cyan=""
@@ -163,6 +189,7 @@ Options:
   --no-codex              Disable Codex JSONL lifecycle detection.
   --no-processes          Disable agent process detection.
   --no-activities         Disable lifecycle activities published by integrations.
+  --no-ui                 Use compact line output instead of the full-screen UI.
   --config PATH           Read a specific strict key=value config file.
   -h, --help              Show this help.
   -v, --version           Show the version.
@@ -171,6 +198,95 @@ USAGE
 
 say() {
   printf '%s\n' "$*"
+}
+
+terminal_stream_is_interactive() {
+  local descriptor="$1"
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ "${AGENTICMODE_TEST_FORCE_TTY:-0}" = "1" ]; then
+    return 0
+  fi
+  [ -t "$descriptor" ]
+}
+
+terminal_columns() {
+  local descriptor="${1:-1}" columns=""
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_COLUMNS:-}" ]; then
+    columns="$AGENTICMODE_TEST_COLUMNS"
+  elif terminal_stream_is_interactive "$descriptor" && [ -x "$agentic_tput" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    columns=$("$agentic_tput" cols 2>/dev/null || true)
+  fi
+  case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
+  [ "$columns" -ge 20 ] || columns=20
+  [ "$columns" -le 500 ] || columns=500
+  printf '%s\n' "$columns"
+}
+
+repeat_spaces() {
+  local count="$1"
+  agentic_repeat_result=""
+  [ "$count" -gt 0 ] || return 0
+  printf -v agentic_repeat_result '%*s' "$count" ''
+}
+
+next_wrapped_text() {
+  local text="$1" width="$2" candidate cut
+  while [ "${text# }" != "$text" ]; do text=${text# }; done
+  if [ "${#text}" -le "$width" ]; then
+    agentic_wrapped_line="$text"
+    agentic_wrapped_remaining=""
+    return 0
+  fi
+  candidate=${text:0:width}
+  case "$candidate" in
+    *' '*)
+      agentic_wrapped_line=${candidate% *}
+      cut=${#agentic_wrapped_line}
+      [ "$cut" -gt 0 ] || cut="$width"
+      ;;
+    *)
+      agentic_wrapped_line="$candidate"
+      cut="$width"
+      ;;
+  esac
+  agentic_wrapped_remaining=${text:cut}
+  while [ "${agentic_wrapped_remaining# }" != "$agentic_wrapped_remaining" ]; do
+    agentic_wrapped_remaining=${agentic_wrapped_remaining# }
+  done
+}
+
+print_structured_line() {
+  local descriptor="$1" label="$2" color="$3" message="$4"
+  local columns layout_width margin prefix_width line_width remaining first=1 reset
+  reset="$agentic_stdout_reset"
+  [ "$descriptor" -eq 1 ] || reset="$agentic_stderr_reset"
+  columns=$(terminal_columns "$descriptor")
+  layout_width=$((columns - 4))
+  [ "$layout_width" -le 96 ] || layout_width=96
+  [ "$layout_width" -ge 16 ] || layout_width=16
+  margin=$(((columns - layout_width) / 2))
+  [ "$margin" -ge 1 ] || margin=1
+  prefix_width=10
+  if [ "$layout_width" -lt 30 ]; then prefix_width=2; fi
+  line_width=$((layout_width - prefix_width))
+  [ "$line_width" -ge 8 ] || line_width=8
+  remaining="$message"
+
+  while [ "$first" -eq 1 ] || [ -n "$remaining" ]; do
+    next_wrapped_text "$remaining" "$line_width"
+    repeat_spaces "$margin"
+    if [ "$first" -eq 1 ] && [ "$prefix_width" -eq 10 ]; then
+      printf '%s%b%-7s%b %s\n' "$agentic_repeat_result" "$color" "$label" "$reset" "$agentic_wrapped_line" >&"$descriptor"
+    elif [ "$first" -eq 1 ]; then
+      printf '%s%b%s%b\n' "$agentic_repeat_result" "$color" "$label" "$reset" >&"$descriptor"
+      repeat_spaces "$((margin + prefix_width))"
+      printf '%s%s\n' "$agentic_repeat_result" "$agentic_wrapped_line" >&"$descriptor"
+    else
+      repeat_spaces "$((margin + prefix_width))"
+      printf '%s%s\n' "$agentic_repeat_result" "$agentic_wrapped_line" >&"$descriptor"
+    fi
+    remaining="$agentic_wrapped_remaining"
+    first=0
+  done
 }
 
 status_line() {
@@ -183,7 +299,16 @@ status_line() {
     ABORTED|ENDED) color="$agentic_stdout_yellow" ;;
     FAILED) color="$agentic_stdout_red" ;;
   esac
-  printf '  %b%-7s%b %s\n' "$color" "$state" "$agentic_stdout_reset" "$*"
+  if [ "$agentic_ui_active" -eq 1 ]; then
+    agentic_ui_notice_state="$state"
+    agentic_ui_notice="$*"
+    return 0
+  fi
+  if terminal_stream_is_interactive 1; then
+    print_structured_line 1 "$state" "$color" "$*"
+  else
+    printf '  %b%-7s%b %s\n' "$color" "$state" "$agentic_stdout_reset" "$*"
+  fi
 }
 
 status_working() {
@@ -215,15 +340,50 @@ status_failed() {
 }
 
 status_detail() {
-  printf '          %s\n' "$*"
+  local columns layout_width margin line_width remaining
+  if [ "$agentic_ui_active" -eq 1 ]; then return 0; fi
+  if ! terminal_stream_is_interactive 1; then
+    printf '          %s\n' "$*"
+    return 0
+  fi
+  columns=$(terminal_columns 1)
+  layout_width=$((columns - 4))
+  [ "$layout_width" -le 96 ] || layout_width=96
+  [ "$layout_width" -ge 16 ] || layout_width=16
+  margin=$(((columns - layout_width) / 2 + 10))
+  line_width=$((layout_width - 10))
+  [ "$line_width" -ge 8 ] || line_width=8
+  remaining="$*"
+  while [ -n "$remaining" ]; do
+    next_wrapped_text "$remaining" "$line_width"
+    repeat_spaces "$margin"
+    printf '%s%s\n' "$agentic_repeat_result" "$agentic_wrapped_line"
+    remaining="$agentic_wrapped_remaining"
+  done
 }
 
 warn() {
-  printf '  %b%-7s%b %s\n' "$agentic_stderr_yellow" "WARN" "$agentic_stderr_reset" "$*" >&2
+  if [ "$agentic_ui_active" -eq 1 ]; then
+    agentic_ui_notice_state="WARN"
+    agentic_ui_notice="$*"
+    return 0
+  fi
+  if terminal_stream_is_interactive 2; then
+    print_structured_line 2 "WARN" "$agentic_stderr_yellow" "$*"
+  else
+    printf '  %b%-7s%b %s\n' "$agentic_stderr_yellow" "WARN" "$agentic_stderr_reset" "$*" >&2
+  fi
 }
 
 fail() {
-  printf '  %b%-7s%b %s\n' "$agentic_stderr_red" "ERROR" "$agentic_stderr_reset" "$*" >&2
+  if [ "$agentic_ui_active" -eq 1 ]; then
+    agentic_ui_notice_state="ERROR"
+    agentic_ui_notice="$*"
+  elif terminal_stream_is_interactive 2; then
+    print_structured_line 2 "ERROR" "$agentic_stderr_red" "$*"
+  else
+    printf '  %b%-7s%b %s\n' "$agentic_stderr_red" "ERROR" "$agentic_stderr_reset" "$*" >&2
+  fi
   exit 1
 }
 
@@ -423,6 +583,7 @@ parse_cli() {
       --no-codex) agentic_include_codex=0; shift ;;
       --no-processes) agentic_include_processes=0; shift ;;
       --no-activities) agentic_include_activities=0; shift ;;
+      --no-ui) agentic_ui_preference="plain"; shift ;;
       --verbose)
         [ "$agentic_command" = "status" ] || fail "--verbose is only valid with status"
         agentic_command_args+=("--verbose")
@@ -455,6 +616,7 @@ parse_cli() {
 }
 
 validate_configuration() {
+  case "$agentic_ui_preference" in auto|plain) ;; *) fail "AGENTICMODE_UI must be auto or plain" ;; esac
   case "$agentic_poll_seconds" in
     ''|*[!0-9]*) fail "poll_seconds must be an integer" ;;
   esac
@@ -1075,9 +1237,324 @@ stop_watchdog() {
   retire_watchdog_lease || return 1
 }
 
+terminal_ui_can_start() {
+  local mode="$1"
+  [ "$agentic_ui_preference" = "auto" ] || return 1
+  [ "$mode" != "run" ] || return 1
+  [ "${TERM:-dumb}" != "dumb" ] || return 1
+  terminal_stream_is_interactive 1 || return 1
+  [ -x "$agentic_tput" ] || return 1
+}
+
+terminal_ui_refresh_dimensions() {
+  local columns="" lines=""
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_COLUMNS:-}" ]; then
+    columns="$AGENTICMODE_TEST_COLUMNS"
+  else
+    columns=$("$agentic_tput" cols 2>/dev/null || true)
+  fi
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_LINES:-}" ]; then
+    lines="$AGENTICMODE_TEST_LINES"
+  else
+    lines=$("$agentic_tput" lines 2>/dev/null || true)
+  fi
+  case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
+  case "$lines" in ''|*[!0-9]*) lines=24 ;; esac
+  [ "$columns" -ge 20 ] || columns=20
+  [ "$columns" -le 500 ] || columns=500
+  [ "$lines" -ge 8 ] || lines=8
+  [ "$lines" -le 200 ] || lines=200
+  agentic_ui_columns="$columns"
+  agentic_ui_lines="$lines"
+}
+
+terminal_ui_clip_text() {
+  local text="$1" width="$2"
+  if [ "${#text}" -le "$width" ]; then
+    agentic_ui_clipped="$text"
+  elif [ "$width" -ge 4 ]; then
+    agentic_ui_clipped="${text:0:$((width - 3))}..."
+  else
+    agentic_ui_clipped=${text:0:width}
+  fi
+}
+
+terminal_ui_set_line() {
+  local row="$1" text="$2" style="${3:-}" maximum padding art_width="${agentic_ui_art_width:-0}"
+  [ "$row" -ge 1 ] && [ "$row" -le "$agentic_ui_lines" ] || return 0
+  if [ "$art_width" -gt 0 ] && [ "${#text}" -lt "$art_width" ]; then
+    padding=$((art_width - ${#text}))
+    repeat_spaces "$padding"
+    text="${text}${agentic_repeat_result}"
+    [ -n "$style" ] || style="$agentic_stdout_cyan"
+  fi
+  maximum=$((agentic_ui_columns - 2))
+  terminal_ui_clip_text "$text" "$maximum"
+  agentic_ui_screen[$row]="$agentic_ui_clipped"
+  agentic_ui_screen_style[$row]="$style"
+}
+
+terminal_ui_panel_border() {
+  local row="$1" width="$2"
+  repeat_spaces "$((width - 2))"
+  agentic_repeat_result=${agentic_repeat_result// /-}
+  agentic_ui_panel_text="+${agentic_repeat_result}+"
+  terminal_ui_set_line "$row" "$agentic_ui_panel_text" "${agentic_stdout_cyan}${agentic_ui_dim}"
+}
+
+terminal_ui_panel_line() {
+  local row="$1" width="$2" label="$3" value="$4" style="${5:-}"
+  local inner label_width=10 available padding
+  inner=$((width - 2))
+  printf -v agentic_ui_panel_text '  %-*s%s' "$label_width" "$label" "$value"
+  terminal_ui_clip_text "$agentic_ui_panel_text" "$inner"
+  agentic_ui_panel_text="$agentic_ui_clipped"
+  available=$((inner - ${#agentic_ui_panel_text}))
+  repeat_spaces "$available"
+  agentic_ui_panel_text="|${agentic_ui_panel_text}${agentic_repeat_result}|"
+  terminal_ui_set_line "$row" "$agentic_ui_panel_text" "$style"
+}
+
+terminal_ui_format_duration() {
+  local seconds="$1" hours minutes
+  [ "$seconds" -ge 0 ] || seconds=0
+  hours=$((seconds / 3600))
+  minutes=$(((seconds % 3600) / 60))
+  seconds=$((seconds % 60))
+  if [ "$hours" -gt 0 ]; then
+    printf -v agentic_ui_duration '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
+  else
+    printf -v agentic_ui_duration '%02d:%02d' "$minutes" "$seconds"
+  fi
+}
+
+terminal_ui_mode_label() {
+  case "$agentic_ui_mode" in
+    current) agentic_ui_mode_text="Current agent snapshot" ;;
+    wait) agentic_ui_mode_text="Exact process wait" ;;
+    *) agentic_ui_mode_text="Manual awake lease" ;;
+  esac
+}
+
+terminal_ui_tracking_label() {
+  local noun="runs"
+  if [ "$agentic_ui_total" -gt 0 ]; then
+    [ "$agentic_ui_total" -ne 1 ] || noun="run"
+    agentic_ui_tracking_text="${agentic_ui_remaining} of ${agentic_ui_total} tracked ${noun} active"
+  else
+    agentic_ui_tracking_text="Until Ctrl+C or am off"
+  fi
+}
+
+terminal_ui_draw_full_art() {
+  local start="$1" phase=$((agentic_ui_frame % 20)) style="$agentic_stdout_cyan" agentic_ui_art_width=58
+  if [ "$phase" -eq 0 ] || [ "$phase" -eq 19 ]; then
+    terminal_ui_set_line "$((start + 4))" '                  __________________________'
+    terminal_ui_set_line "$((start + 5))" '       __________/_________________________/|'
+    terminal_ui_set_line "$((start + 6))" '      /___________________________________/ /'
+    terminal_ui_set_line "$((start + 7))" '      \___________________________________\/' "$style"
+  elif [ "$phase" -eq 1 ] || [ "$phase" -eq 18 ]; then
+    terminal_ui_set_line "$((start + 3))" '                       _____________________'
+    terminal_ui_set_line "$((start + 4))" '              ________/____________________/|'
+    terminal_ui_set_line "$((start + 5))" '       ______/                            / /'
+    terminal_ui_set_line "$((start + 6))" '      /__________________________________/ /'
+    terminal_ui_set_line "$((start + 7))" '      \__________________________________\/' "$style"
+  elif [ "$phase" -eq 2 ] || [ "$phase" -eq 17 ]; then
+    terminal_ui_set_line "$((start + 1))" '                         .-------------------.'
+    terminal_ui_set_line "$((start + 2))" '                     ___/                   /|'
+    terminal_ui_set_line "$((start + 3))" '                 ___/                     / |'
+    terminal_ui_set_line "$((start + 4))" '             ___/                        /  |'
+    terminal_ui_set_line "$((start + 5))" '        ____/___________________________/   |'
+    terminal_ui_set_line "$((start + 6))" '       /___________________________________/'
+    terminal_ui_set_line "$((start + 7))" '       \___________________________________\/' "$style"
+  else
+    terminal_ui_set_line "$start"       '                .-----------------------------.' "$style"
+    terminal_ui_set_line "$((start + 1))" '               /                             /|'
+    terminal_ui_set_line "$((start + 2))" '              /       A G E N T I C         / |' "${agentic_stdout_cyan}${agentic_ui_bold}"
+    terminal_ui_set_line "$((start + 3))" '             /          A W A K E          /  |' "${agentic_stdout_green}${agentic_ui_bold}"
+    terminal_ui_set_line "$((start + 4))" '            /                             /   |'
+    terminal_ui_set_line "$((start + 5))" '           /_____________________________/    |'
+    terminal_ui_set_line "$((start + 6))" '          /___________________________________/'
+    terminal_ui_set_line "$((start + 7))" '          \___________________________________\/' "$style"
+  fi
+}
+
+terminal_ui_draw_compact_art() {
+  local start="$1" phase=$((agentic_ui_frame % 16)) style="$agentic_stdout_cyan" agentic_ui_art_width=36
+  if [ "$phase" -le 1 ] || [ "$phase" -ge 14 ]; then
+    terminal_ui_set_line "$((start + 2))" '          ___________________'
+    terminal_ui_set_line "$((start + 3))" '    _____/__________________/|'
+    terminal_ui_set_line "$((start + 4))" '   /________________________|/' "$style"
+  elif [ "$phase" -eq 2 ] || [ "$phase" -eq 13 ]; then
+    terminal_ui_set_line "$((start + 1))" '             .---------------.'
+    terminal_ui_set_line "$((start + 2))" '         ___/               /|'
+    terminal_ui_set_line "$((start + 3))" '     ___/__________________/ |'
+    terminal_ui_set_line "$((start + 4))" '    /________________________/' "$style"
+  else
+    terminal_ui_set_line "$start"       '       .----------------------.' "$style"
+    terminal_ui_set_line "$((start + 1))" '      /                      /|'
+    terminal_ui_set_line "$((start + 2))" '     /        AWAKE         / |' "${agentic_stdout_green}${agentic_ui_bold}"
+    terminal_ui_set_line "$((start + 3))" '    /______________________/  |'
+    terminal_ui_set_line "$((start + 4))" '   /_________________________/' "$style"
+  fi
+}
+
+terminal_ui_build_screen() {
+  local content_height top art_start panel_top panel_width footer_row
+  local time_text safety_text notice_text notice_label="SAFETY"
+  agentic_ui_screen=()
+  agentic_ui_screen_style=()
+  terminal_ui_mode_label
+  terminal_ui_tracking_label
+  terminal_ui_format_duration "$agentic_ui_elapsed_seconds"
+  time_text="$agentic_ui_duration elapsed"
+  if [ "$agentic_timeout_seconds" -gt 0 ]; then
+    terminal_ui_format_duration "$agentic_timeout_seconds"
+    time_text="${time_text} / ${agentic_ui_duration} limit"
+  fi
+  safety_text="Ctrl+C restores the previous sleep setting"
+  if [ -n "$agentic_ui_notice" ]; then
+    notice_label="UPDATE"
+    notice_text="${agentic_ui_notice_state}: ${agentic_ui_notice}"
+  else
+    notice_text="$safety_text"
+  fi
+
+  if [ "$agentic_ui_columns" -ge 64 ] && [ "$agentic_ui_lines" -ge 22 ]; then
+    content_height=20
+    top=$(((agentic_ui_lines - content_height) / 2 + 1))
+    terminal_ui_set_line "$top" 'A G E N T I C   M O D E' "${agentic_stdout_cyan}${agentic_ui_bold}"
+    terminal_ui_set_line "$((top + 1))" 'A quiet machine is still a working machine' "$agentic_ui_dim"
+    art_start=$((top + 3))
+    terminal_ui_draw_full_art "$art_start"
+    panel_top=$((art_start + 9))
+    panel_width=$((agentic_ui_columns - 8))
+    [ "$panel_width" -le 92 ] || panel_width=92
+    terminal_ui_panel_border "$panel_top" "$panel_width"
+    terminal_ui_panel_line "$((panel_top + 1))" "$panel_width" "STATE" "AWAKE - sleep override active" "${agentic_stdout_green}${agentic_ui_bold}"
+    terminal_ui_panel_line "$((panel_top + 2))" "$panel_width" "MODE" "$agentic_ui_mode_text"
+    terminal_ui_panel_line "$((panel_top + 3))" "$panel_width" "TRACKING" "$agentic_ui_tracking_text"
+    terminal_ui_panel_line "$((panel_top + 4))" "$panel_width" "TIME" "$time_text"
+    terminal_ui_panel_line "$((panel_top + 5))" "$panel_width" "$notice_label" "$notice_text" "$agentic_ui_dim"
+    terminal_ui_panel_border "$((panel_top + 6))" "$panel_width"
+    footer_row=$((agentic_ui_lines - 1))
+    terminal_ui_set_line "$footer_row" 'Run am status --verbose in another terminal' "$agentic_ui_dim"
+  elif [ "$agentic_ui_columns" -ge 42 ] && [ "$agentic_ui_lines" -ge 14 ]; then
+    content_height=14
+    top=$(((agentic_ui_lines - content_height) / 2 + 1))
+    terminal_ui_set_line "$top" 'A G E N T I C   M O D E' "${agentic_stdout_cyan}${agentic_ui_bold}"
+    art_start=$((top + 2))
+    terminal_ui_draw_compact_art "$art_start"
+    panel_top=$((art_start + 6))
+    panel_width=$((agentic_ui_columns - 4))
+    [ "$panel_width" -le 72 ] || panel_width=72
+    terminal_ui_panel_border "$panel_top" "$panel_width"
+    terminal_ui_panel_line "$((panel_top + 1))" "$panel_width" "AWAKE" "$agentic_ui_mode_text" "${agentic_stdout_green}${agentic_ui_bold}"
+    terminal_ui_panel_line "$((panel_top + 2))" "$panel_width" "TRACKING" "$agentic_ui_tracking_text"
+    terminal_ui_panel_line "$((panel_top + 3))" "$panel_width" "TIME" "$time_text"
+    terminal_ui_panel_border "$((panel_top + 4))" "$panel_width"
+    terminal_ui_set_line "$agentic_ui_lines" 'Ctrl+C restores sleep' "$agentic_ui_dim"
+  else
+    top=$(((agentic_ui_lines - 6) / 2 + 1))
+    terminal_ui_set_line "$top" 'AGENTIC MODE' "${agentic_stdout_cyan}${agentic_ui_bold}"
+    case $((agentic_ui_frame % 6)) in
+      0|5) terminal_ui_set_line "$((top + 2))" '____/____/|' "$agentic_stdout_cyan" ;;
+      1|4) terminal_ui_set_line "$((top + 2))" '___/    /|' "$agentic_stdout_cyan" ;;
+      *) terminal_ui_set_line "$((top + 2))" '/  AWAKE /|' "${agentic_stdout_green}${agentic_ui_bold}" ;;
+    esac
+    terminal_ui_set_line "$((top + 3))" "$agentic_ui_tracking_text"
+    terminal_ui_set_line "$((top + 4))" "$time_text" "$agentic_ui_dim"
+    terminal_ui_set_line "$agentic_ui_lines" 'Ctrl+C restores sleep' "$agentic_ui_dim"
+  fi
+}
+
+terminal_ui_render() {
+  local row text style old_text old_style column buffer resized="$agentic_ui_resized" changed=0
+  if [ "$resized" -eq 1 ]; then
+    terminal_ui_refresh_dimensions
+    agentic_ui_previous=()
+    agentic_ui_previous_style=()
+    agentic_ui_resized=0
+  fi
+  terminal_ui_build_screen
+  buffer=$'\033[?2026h'
+  if [ "$resized" -eq 1 ]; then
+    buffer="${buffer}${agentic_ui_clear}"
+    changed=1
+  fi
+  row=1
+  while [ "$row" -le "$agentic_ui_lines" ]; do
+    text=${agentic_ui_screen[$row]-}
+    style=${agentic_ui_screen_style[$row]-}
+    old_text=${agentic_ui_previous[$row]-}
+    old_style=${agentic_ui_previous_style[$row]-}
+    if [ "$text" != "$old_text" ] || [ "$style" != "$old_style" ]; then
+      changed=1
+      buffer="${buffer}"$'\033['"${row};1H"$'\033[2K'
+      if [ -n "$text" ]; then
+        column=$(((agentic_ui_columns - ${#text}) / 2 + 1))
+        [ "$column" -ge 1 ] || column=1
+        buffer="${buffer}"$'\033['"${row};${column}H${style}${text}${agentic_stdout_reset}"
+      fi
+      agentic_ui_previous[$row]="$text"
+      agentic_ui_previous_style[$row]="$style"
+    fi
+    row=$((row + 1))
+  done
+  agentic_ui_frame=$((agentic_ui_frame + 1))
+  [ "$changed" -eq 1 ] || return 0
+  buffer="${buffer}"$'\033[?2026l'
+  printf '%s' "$buffer"
+}
+
+terminal_ui_start() {
+  local mode="$1" started now
+  terminal_ui_can_start "$mode" || return 1
+  agentic_ui_smcup=$("$agentic_tput" smcup 2>/dev/null) || return 1
+  agentic_ui_rmcup=$("$agentic_tput" rmcup 2>/dev/null) || return 1
+  [ -n "$agentic_ui_smcup" ] && [ -n "$agentic_ui_rmcup" ] || return 1
+  agentic_ui_civis=$("$agentic_tput" civis 2>/dev/null || true)
+  agentic_ui_cnorm=$("$agentic_tput" cnorm 2>/dev/null || true)
+  agentic_ui_clear=$("$agentic_tput" clear 2>/dev/null || printf '\033[2J\033[H')
+  if [ -n "$agentic_stdout_reset" ]; then
+    agentic_ui_bold=$'\033[1m'
+    agentic_ui_dim=$'\033[2m'
+  fi
+  agentic_ui_mode="$mode"
+  started=$(cat "$agentic_started_epoch_file" 2>/dev/null || printf '0')
+  now=$(date +%s)
+  case "$started" in ''|*[!0-9]*) started="$now" ;; esac
+  agentic_ui_elapsed_seconds=$((now - started))
+  [ "$agentic_ui_elapsed_seconds" -ge 0 ] || agentic_ui_elapsed_seconds=0
+  agentic_ui_active=1
+  agentic_ui_resized=1
+  agentic_ui_notice_state=""
+  agentic_ui_notice=""
+  trap 'agentic_ui_resized=1' WINCH
+  printf '%s%s%s' "$agentic_ui_smcup" "$agentic_ui_clear" "$agentic_ui_civis"
+}
+
+terminal_ui_stop() {
+  local notice_state notice
+  [ "$agentic_ui_active" -eq 1 ] || return 0
+  notice_state="$agentic_ui_notice_state"
+  notice="$agentic_ui_notice"
+  agentic_ui_active=0
+  printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
+  agentic_ui_previous=()
+  agentic_ui_previous_style=()
+  [ -n "$notice" ] || return 0
+  case "$notice_state" in
+    WARN) warn "$notice" ;;
+    ERROR) print_structured_line 2 "ERROR" "$agentic_stderr_red" "$notice" ;;
+    *) status_line "$notice_state" "$notice" ;;
+  esac
+}
+
 cleanup_controller() {
   local exit_code=$? baseline
-  trap - EXIT INT TERM HUP TSTP
+  trap - EXIT INT TERM HUP TSTP WINCH
+  terminal_ui_stop
   if [ -n "$agentic_timer_pid" ]; then
     kill -TERM "$agentic_timer_pid" 2>/dev/null || true
     kill -CONT "$agentic_timer_pid" 2>/dev/null || true
@@ -1129,10 +1606,31 @@ install_controller_traps() {
 }
 
 controller_sleep() {
-  "$agentic_sleep" "$1" &
-  agentic_timer_pid=$!
-  wait "$agentic_timer_pid" 2>/dev/null || true
-  agentic_timer_pid=""
+  local seconds="$1" ticks tick=0
+  if [ "$agentic_ui_active" -eq 0 ]; then
+    terminal_ui_start "$agentic_ui_mode" || true
+  fi
+  if [ "$agentic_ui_active" -eq 0 ]; then
+    "$agentic_sleep" "$seconds" &
+    agentic_timer_pid=$!
+    wait "$agentic_timer_pid" 2>/dev/null || true
+    agentic_timer_pid=""
+    return 0
+  fi
+
+  ticks=$((seconds * agentic_ui_frames_per_second))
+  [ "$ticks" -ge 1 ] || ticks=1
+  while [ "$tick" -lt "$ticks" ]; do
+    terminal_ui_render
+    "$agentic_sleep" 0.2 &
+    agentic_timer_pid=$!
+    wait "$agentic_timer_pid" 2>/dev/null || true
+    agentic_timer_pid=""
+    tick=$((tick + 1))
+    if [ $((agentic_ui_frame % agentic_ui_frames_per_second)) -eq 0 ]; then
+      agentic_ui_elapsed_seconds=$((agentic_ui_elapsed_seconds + 1))
+    fi
+  done
 }
 
 ensure_watchdog_healthy() {
@@ -1210,6 +1708,7 @@ check_runtime_limits() {
 
 start_controller() {
   local mode="$1" now
+  agentic_ui_mode="$mode"
   validate_host
   install_controller_traps
   acquire_controller
@@ -1727,8 +2226,11 @@ wait_for_targets() {
   local total remaining previous
   total=$(target_count "$agentic_targets_file")
   previous="$total"
+  agentic_ui_total="$total"
+  agentic_ui_remaining="$total"
   while [ ! -e "$agentic_stop_file" ]; do
     remaining=$(remaining_target_count)
+    agentic_ui_remaining="$remaining"
     if [ "$remaining" -ne "$previous" ]; then
       say ""
       show_newly_inactive_targets
@@ -1752,6 +2254,8 @@ make_target_snapshot() {
 }
 
 run_indefinitely() {
+  agentic_ui_total=0
+  agentic_ui_remaining=0
   start_controller "indefinite"
   status_working "Agentic mode is on until Ctrl+C or agenticmode off."
   while [ ! -e "$agentic_stop_file" ]; do
@@ -1773,6 +2277,8 @@ run_current() {
   fi
 
   start_controller "$mode"
+  agentic_ui_total="$total"
+  agentic_ui_remaining="$total"
   mv "$snapshot" "$agentic_targets_file"
   agentic_finished_targets=""
   if [ "$total" -eq 1 ]; then

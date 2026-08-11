@@ -191,6 +191,7 @@ printf 'Test: syntax and version\n'
 assert_equals "agenticmode 1.3.0" "$("$repo_dir/bin/agenticmode" --version)"
 "$repo_dir/bin/agenticmode" --help > "$test_root/help-command.log"
 assert_contains "agenticmode update" "$test_root/help-command.log"
+assert_contains "--no-ui" "$test_root/help-command.log"
 
 printf 'Test: signal cleanup restores a normal baseline\n'
 "$repo_dir/bin/agenticmode" > "$test_root/interrupt.log" 2>&1 &
@@ -695,6 +696,48 @@ controller_pid=""
 assert_equals 75 "$timeout_status"
 wait_for_value 0 "$pmset_state"
 assert_contains "Maximum duration reached" "$test_root/timeout.log"
+assert_not_contains $'\033[?1049h' "$test_root/timeout.log"
+
+printf 'Test: full-screen UI renders, animates, and restores the terminal\n'
+set +e
+TERM=xterm-256color FORCE_COLOR=1 \
+  AGENTICMODE_TEST_FORCE_TTY=1 \
+  AGENTICMODE_TEST_COLUMNS=80 \
+  AGENTICMODE_TEST_LINES=24 \
+  "$repo_dir/bin/agenticmode" --timeout 2s > "$test_root/full-screen-ui.log" 2>&1 &
+controller_pid=$!
+wait_for_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
+kill -WINCH "$controller_pid"
+wait "$controller_pid"
+full_screen_status=$?
+controller_pid=""
+set -e
+assert_equals 75 "$full_screen_status"
+wait_for_value 0 "$pmset_state"
+assert_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
+assert_contains $'\033[?2026h' "$test_root/full-screen-ui.log"
+assert_contains "A G E N T I C   M O D E" "$test_root/full-screen-ui.log"
+assert_contains "A W A K E" "$test_root/full-screen-ui.log"
+assert_contains "AWAKE - sleep override active" "$test_root/full-screen-ui.log"
+assert_contains $'\033[?1049l' "$test_root/full-screen-ui.log"
+assert_contains "Maximum duration reached" "$test_root/full-screen-ui.log"
+
+printf 'Test: plain interactive output respects narrow terminal width\n'
+set +e
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_TEST_FORCE_TTY=1 \
+  AGENTICMODE_TEST_COLUMNS=40 \
+  "$repo_dir/bin/agenticmode" --no-ui --timeout 1s > "$test_root/plain-layout.log" 2>&1
+plain_layout_status=$?
+set -e
+assert_equals 75 "$plain_layout_status"
+wait_for_value 0 "$pmset_state"
+assert_not_contains $'\033[?1049h' "$test_root/plain-layout.log"
+if /usr/bin/awk 'length($0) > 40 { too_long=1 } END { exit too_long ? 0 : 1 }' "$test_root/plain-layout.log"; then
+  printf 'Plain interactive output exceeded the 40-column terminal width\n' >&2
+  sed -n '1,120p' "$test_root/plain-layout.log" >&2
+  exit 1
+fi
 
 printf 'Test: minimum battery cutoff restores sleep\n'
 printf 'Battery Power\n' > "$power_source_file"
