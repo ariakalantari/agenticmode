@@ -791,7 +791,17 @@ printf 'Test: installer ownership checks and custom-prefix uninstall\n'
 install_prefix="$test_root/prefix with space"
 PREFIX="$install_prefix" "$repo_dir/install.sh" > "$test_root/install.log" 2>&1
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/agenticmode")"
+assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/am")"
+assert_equals "agenticmode 1.2.0" "$("$install_prefix/bin/am" --version)"
 PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1
+rm "$install_prefix/bin/am"
+ln -s /tmp/unrelated-am "$install_prefix/bin/am"
+if PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1; then
+  printf 'Installer unexpectedly replaced an unrelated am symlink\n' >&2
+  exit 1
+fi
+assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/agenticmode")"
+PREFIX="$install_prefix" "$repo_dir/install.sh" --force >> "$test_root/install.log" 2>&1
 rm "$install_prefix/bin/agenticmode"
 ln -s /tmp/unrelated-agenticmode "$install_prefix/bin/agenticmode"
 if PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1; then
@@ -801,6 +811,7 @@ fi
 PREFIX="$install_prefix" "$repo_dir/install.sh" --force >> "$test_root/install.log" 2>&1
 PREFIX="$install_prefix" "$repo_dir/uninstall.sh" > "$test_root/uninstall.log" 2>&1
 [ ! -e "$install_prefix/bin/agenticmode" ] || { printf 'Uninstaller left the custom-prefix symlink behind\n' >&2; exit 1; }
+[ ! -e "$install_prefix/bin/am" ] || { printf 'Uninstaller left the custom-prefix am symlink behind\n' >&2; exit 1; }
 
 printf 'Test: remote bootstrap install is persistent and removable\n'
 remote_root="$test_root/managed source"
@@ -816,10 +827,13 @@ mkdir -p "$empty_working_dir"
 ) > "$test_root/remote-install.log" 2>&1
 remote_root_canonical=$(CDPATH= cd -- "$remote_root" && pwd)
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/agenticmode")"
+assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/am")"
 assert_equals "agenticmode 1.2.0" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.2.0" "$("$remote_prefix/bin/am" --version)"
 [ -f "$remote_root/.agenticmode-remote-install" ] || { printf 'Remote installer marker was not created\n' >&2; exit 1; }
 PREFIX="$remote_prefix" "$remote_root/uninstall.sh" > "$test_root/remote-uninstall.log" 2>&1
 [ ! -e "$remote_prefix/bin/agenticmode" ] || { printf 'Remote uninstaller left the command symlink behind\n' >&2; exit 1; }
+[ ! -e "$remote_prefix/bin/am" ] || { printf 'Remote uninstaller left the am symlink behind\n' >&2; exit 1; }
 [ ! -e "$remote_root" ] || { printf 'Remote uninstaller left the managed source behind\n' >&2; exit 1; }
 
 printf 'All tests passed.\n'

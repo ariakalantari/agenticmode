@@ -25,9 +25,13 @@ if [ -x "$source_file" ]; then
 fi
 
 if [ -n "${PREFIX:-}" ]; then
-  targets=("$PREFIX/bin/agenticmode")
+  targets=("$PREFIX/bin/agenticmode" "$PREFIX/bin/am")
 else
-  targets=(/opt/homebrew/bin/agenticmode /usr/local/bin/agenticmode "$HOME/.local/bin/agenticmode")
+  targets=(
+    /opt/homebrew/bin/agenticmode /opt/homebrew/bin/am
+    /usr/local/bin/agenticmode /usr/local/bin/am
+    "$HOME/.local/bin/agenticmode" "$HOME/.local/bin/am"
+  )
 fi
 
 for target in "${targets[@]}"; do
@@ -39,7 +43,7 @@ for target in "${targets[@]}"; do
 done
 
 if [ "$removed" -eq 0 ]; then
-  printf 'No agenticmode symlink for this checkout was found.\n'
+  printf 'No agenticmode or am symlink for this checkout was found.\n'
 fi
 
 if [ "${AGENTICMODE_TESTING:-0}" != "1" ] && [ -f "$helper_target" ] && [ ! -L "$helper_target" ]; then
