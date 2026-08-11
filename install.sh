@@ -129,16 +129,19 @@ fi
 
 mkdir -p "$install_dir"
 target="$install_dir/agenticmode"
+alias_target="$install_dir/am"
 
-if [ -e "$target" ] && [ ! -L "$target" ]; then
-  printf 'install.sh: refusing to replace non-symlink %s\n' "$target" >&2
-  exit 1
-fi
-if [ -L "$target" ] && [ "$(readlink "$target")" != "$source_file" ] && [ "$force" -ne 1 ]; then
-  printf 'install.sh: refusing to replace a symlink owned by another install: %s\n' "$target" >&2
-  printf 'Re-run with --force only if you intend to replace it.\n' >&2
-  exit 1
-fi
+for command_target in "$target" "$alias_target"; do
+  if [ -e "$command_target" ] && [ ! -L "$command_target" ]; then
+    printf 'install.sh: refusing to replace non-symlink %s\n' "$command_target" >&2
+    exit 1
+  fi
+  if [ -L "$command_target" ] && [ "$(readlink "$command_target")" != "$source_file" ] && [ "$force" -ne 1 ]; then
+    printf 'install.sh: refusing to replace a symlink owned by another install: %s\n' "$command_target" >&2
+    printf 'Re-run with --force only if you intend to replace it.\n' >&2
+    exit 1
+  fi
+done
 
 chmod 755 "$source_file"
 chmod 755 "$helper_source"
@@ -150,6 +153,7 @@ if [ "${AGENTICMODE_TESTING:-0}" != "1" ]; then
 fi
 
 ln -sfn "$source_file" "$target"
+ln -sfn "$source_file" "$alias_target"
 
 printf 'Installed agenticmode at %s\n' "$target"
 case ":$PATH:" in
@@ -160,4 +164,4 @@ case ":$PATH:" in
     ;;
 esac
 
-printf 'Run: agenticmode --help\n'
+printf 'Run: agenticmode --help (or am --help)\n'

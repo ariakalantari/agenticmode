@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/inst
 
 The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Homebrew asks for an administrator password on the first awake-mode run; the direct installer asks once during installation. This installs a minimal safety watchdog in `/Library/PrivilegedHelperTools`.
 
+Every command is also available through the shorter `am` alias. For example, `am current` is equivalent to `agenticmode current`.
+
 See [Installation and upgrades](https://github.com/ariakalantari/agenticmode/wiki/Installation-and-Upgrades) for pinned installs, checkout installs, custom paths, upgrades, and uninstall instructions.
 
 ### 2. Start a safe tracked run
