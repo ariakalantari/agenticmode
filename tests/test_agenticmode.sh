@@ -201,7 +201,7 @@ clear_codex_fixtures() {
 
 printf 'Test: syntax and version\n'
 /bin/bash -n "$repo_dir/bin/agenticmode" "$repo_dir/libexec/agenticmode-watchdog" "$repo_dir/install.sh" "$repo_dir/uninstall.sh" "$repo_dir/scripts/package-release.sh"
-assert_equals "agenticmode 1.3.0" "$("$repo_dir/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.1" "$("$repo_dir/bin/agenticmode" --version)"
 "$repo_dir/bin/agenticmode" --help > "$test_root/help-command.log"
 assert_contains "agenticmode update" "$test_root/help-command.log"
 assert_contains "--no-ui" "$test_root/help-command.log"
@@ -591,8 +591,11 @@ rm -f "$state_dir/activities/opencode~unsafe-link.activity" "$state_dir/activiti
 printf 'Test: current deduplicates Codex copies and ignores later turns\n'
 parent_fixture="$codex_home/sessions/2026/08/11/rollout-parent.jsonl"
 sub_fixture="$codex_home/sessions/2026/08/11/rollout-sub.jsonl"
+cat > "$codex_home/.codex-global-state.json" <<'CODEX_STATE'
+{"electron-persisted-atom-state":{"thread-descriptions-v1":{"thread-parent":"Merge PRs and improve docs","thread-sub":"Generated title should yield to a custom session name"}}}
+CODEX_STATE
 /usr/bin/sqlite3 "$codex_home/state_5.sqlite" \
-  "create table threads (rollout_path text primary key, title text not null); insert into threads values ('$parent_fixture', 'Merge PRs and improve docs' || char(27)); insert into threads values ('$sub_fixture', 'Update version and release notes');"
+  "create table threads (id text primary key, rollout_path text not null, title text not null, name text); insert into threads values ('thread-parent', '$parent_fixture', 'Raw parent user prompt' || char(27), null); insert into threads values ('thread-sub', '$sub_fixture', 'Raw sub user prompt', 'Update version and release notes');"
 printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-parent"}}' > "$parent_fixture"
 /bin/sleep 1
 printf '%s\n' \
@@ -607,6 +610,8 @@ wait_for_contains "WORKING Update version and release notes" "$test_root/current
 wait_for_contains "Progress: 2 working - 0/2 no longer active (0% by run count)" "$test_root/current.log"
 assert_not_contains "Codex turn turn-parent" "$test_root/current.log"
 assert_not_contains "Codex turn turn-sub" "$test_root/current.log"
+assert_not_contains "Raw parent user prompt" "$test_root/current.log"
+assert_not_contains "Raw sub user prompt" "$test_root/current.log"
 if LC_ALL=C grep -q $'\033' "$test_root/current.log"; then
   printf 'Codex session title leaked terminal control codes\n' >&2
   exit 1
@@ -648,6 +653,45 @@ wait_for_value 0 "$pmset_state"
 assert_contains "Tracking complete: all 2 tracked runs are no longer active" "$test_root/current.log"
 assert_contains "ABORTED Update version and release notes" "$test_root/current.log"
 assert_occurrences 2 "Update version and release notes" "$test_root/current.log"
+
+printf 'Test: full-screen current uses session titles and reflows with ellipses\n'
+clear_codex_fixtures
+/usr/bin/sqlite3 "$codex_home/state_5.sqlite" \
+  "update threads set name = null where id = 'thread-parent';"
+cat > "$codex_home/.codex-global-state.json" <<'CODEX_STATE'
+{"electron-persisted-atom-state":{"thread-descriptions-v1":{"thread-parent":"Responsive session title expands across the terminal width"}}}
+CODEX_STATE
+printf '%s\n' '{"timestamp":"2026-08-11T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-ui"}}' > "$parent_fixture"
+ui_columns_file="$test_root/current-ui-columns"
+ui_lines_file="$test_root/current-ui-lines"
+printf '100\n' > "$ui_columns_file"
+printf '30\n' > "$ui_lines_file"
+set +e
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_TEST_FORCE_TTY=1 \
+  AGENTICMODE_TEST_COLUMNS_FILE="$ui_columns_file" \
+  AGENTICMODE_TEST_LINES_FILE="$ui_lines_file" \
+  "$repo_dir/bin/agenticmode" current --no-processes --timeout 3s > "$test_root/current-ui.log" 2>&1 &
+controller_pid=$!
+wait_for_contains "Responsive session title expands across the terminal width" "$test_root/current-ui.log"
+assert_contains $'\033[6;5HA G E N T I C   M O D E' "$test_root/current-ui.log"
+assert_contains $'\033[17;5H+------------------------------------------------------------------------------------------+' "$test_root/current-ui.log"
+assert_contains $'\033[22;5H|  WORKING   Responsive session title expands across the terminal width' "$test_root/current-ui.log"
+printf '50\n' > "$ui_columns_file"
+printf '18\n' > "$ui_lines_file"
+kill -WINCH "$controller_pid"
+wait_for_contains "Responsive session title expa..." "$test_root/current-ui.log"
+assert_contains $'\033[3;3HA G E N T I C   M O D E' "$test_root/current-ui.log"
+assert_contains $'\033[11;3H+--------------------------------------------+' "$test_root/current-ui.log"
+assert_contains $'\033[13;3H|  WORKING   Responsive session title expa...' "$test_root/current-ui.log"
+wait "$controller_pid"
+current_ui_status=$?
+controller_pid=""
+set -e
+assert_equals 75 "$current_ui_status"
+wait_for_value 0 "$pmset_state"
+assert_contains $'\033[?1049l' "$test_root/current-ui.log"
+assert_not_contains "Raw parent user prompt" "$test_root/current-ui.log"
 
 printf 'Test: caller thread exclusion prevents self-deadlock\n'
 clear_codex_fixtures
@@ -776,7 +820,7 @@ for ui_size in 8x5 1000x400; do
   wait_for_value 0 "$pmset_state"
   assert_cursor_bounds "$test_root/ui-${ui_size}.log" "$ui_lines" "$ui_columns"
 done
-assert_contains $'\033[190;489H' "$test_root/ui-1000x400.log"
+assert_contains $'\033[191;455H' "$test_root/ui-1000x400.log"
 
 printf 'Test: full-screen UI restores the terminal on controller signals\n'
 for signal_case in TERM:143 HUP:129 TSTP:148; do
@@ -813,6 +857,7 @@ set -e
 assert_equals 75 "$plain_layout_status"
 wait_for_value 0 "$pmset_state"
 assert_not_contains $'\033[?1049h' "$test_root/plain-layout.log"
+assert_contains "..." "$test_root/plain-layout.log"
 if /usr/bin/awk 'length($0) > 40 { too_long=1 } END { exit too_long ? 0 : 1 }' "$test_root/plain-layout.log"; then
   printf 'Plain interactive output exceeded the 40-column terminal width\n' >&2
   sed -n '1,120p' "$test_root/plain-layout.log" >&2
@@ -917,7 +962,7 @@ install_prefix="$test_root/prefix with space"
 PREFIX="$install_prefix" "$repo_dir/install.sh" > "$test_root/install.log" 2>&1
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/agenticmode")"
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/am")"
-assert_equals "agenticmode 1.3.0" "$("$install_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.1" "$("$install_prefix/bin/am" --version)"
 PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1
 rm "$install_prefix/bin/am"
 ln -s /tmp/unrelated-am "$install_prefix/bin/am"
@@ -953,8 +998,8 @@ mkdir -p "$empty_working_dir"
 remote_root_canonical=$(CDPATH= cd -- "$remote_root" && pwd)
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/agenticmode")"
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/am")"
-assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/agenticmode" --version)"
-assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/am" --version)"
 [ -f "$remote_root/.agenticmode-remote-install" ] || { printf 'Remote installer marker was not created\n' >&2; exit 1; }
 assert_equals "agenticmode-remote-install:v2
 stable
@@ -979,11 +1024,11 @@ cp "$repo_dir/config.example" "$release_source/config.example"
 cp "$repo_dir/bin/agenticmode" "$release_source/bin/agenticmode"
 cp "$repo_dir/libexec/agenticmode-watchdog" "$release_source/libexec/agenticmode-watchdog"
 cp "$repo_dir/scripts/package-release.sh" "$release_source/scripts/package-release.sh"
-sed 's/readonly AGENTICMODE_VERSION="1.3.0"/readonly AGENTICMODE_VERSION="1.3.1"/' \
+sed 's/readonly AGENTICMODE_VERSION="1.3.1"/readonly AGENTICMODE_VERSION="1.3.2"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode" "$release_source/scripts/package-release.sh"
-"$release_source/scripts/package-release.sh" v1.3.1 "$release_base/latest/download" > "$test_root/package-release.log"
+"$release_source/scripts/package-release.sh" v1.3.2 "$release_base/latest/download" > "$test_root/package-release.log"
 
 "$repo_dir/bin/agenticmode" > "$test_root/update-active-controller.log" 2>&1 &
 controller_pid=$!
@@ -1009,29 +1054,29 @@ if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$corrupt_release_base" "$remote_pre
   exit 1
 fi
 assert_contains "checksum did not match" "$test_root/update-corrupt.log"
-assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
 
 AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-success.log" 2>&1
-assert_contains "Updated agenticmode 1.3.0 -> 1.3.1" "$test_root/update-success.log"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/am" --version)"
+assert_contains "Updated agenticmode 1.3.1 -> 1.3.2" "$test_root/update-success.log"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/am" --version)"
 AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/agenticmode" update > "$test_root/update-current.log" 2>&1
 assert_contains "already the latest stable release" "$test_root/update-current.log"
 
 rollback_release_base="$test_root/rollback-releases"
 mkdir -p "$rollback_release_base/latest/download"
-sed 's/readonly AGENTICMODE_VERSION="1.3.1"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode"
 printf '\n[ "${AGENTICMODE_TESTING:-0}" != "1" ] || exit 42\n' >> "$release_source/install.sh"
-"$release_source/scripts/package-release.sh" v1.3.2 "$rollback_release_base/latest/download" > "$test_root/package-rollback-release.log"
+"$release_source/scripts/package-release.sh" v1.3.3 "$rollback_release_base/latest/download" > "$test_root/package-rollback-release.log"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-rollback.log" 2>&1; then
   printf 'Update unexpectedly succeeded when the staged installer failed\n' >&2
   exit 1
 fi
 assert_contains "previous managed files were restored" "$test_root/update-rollback.log"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
 
 incomplete_rollback_release_base="$test_root/incomplete-rollback-releases"
 mkdir -p "$incomplete_rollback_release_base/latest/download"
@@ -1050,7 +1095,7 @@ fi
 assert_contains "rollback was incomplete; reinstall agenticmode before running it again" "$test_root/update-incomplete-rollback.log"
 chmod 755 "$remote_root/bin"
 /usr/bin/install -m 755 "$test_root/agenticmode-before-incomplete-rollback" "$remote_root/bin/agenticmode"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
 sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.2"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
@@ -1066,16 +1111,16 @@ if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$syntax_release_base" "$remote_pref
   exit 1
 fi
 assert_contains "failed shell syntax validation" "$test_root/update-syntax.log"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
 
 cp "$remote_root/.agenticmode-remote-install" "$test_root/managed-marker"
-printf 'agenticmode-remote-install:v2\npinned:v1.3.1\n%s\n%s\n' "$remote_root_canonical" "$remote_prefix" > "$remote_root/.agenticmode-remote-install"
+printf 'agenticmode-remote-install:v2\npinned:v1.3.2\n%s\n%s\n' "$remote_root_canonical" "$remote_prefix" > "$remote_root/.agenticmode-remote-install"
 chmod 600 "$remote_root/.agenticmode-remote-install"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-pinned.log" 2>&1; then
   printf 'Update unexpectedly changed a pinned direct install\n' >&2
   exit 1
 fi
-assert_contains "pinned to v1.3.1" "$test_root/update-pinned.log"
+assert_contains "pinned to v1.3.2" "$test_root/update-pinned.log"
 mv "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
 
 chmod 666 "$remote_root/.agenticmode-remote-install"
