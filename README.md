@@ -96,6 +96,8 @@ A timeout or battery cutoff ends only the awake lease. It never kills a tracked 
 | --- | --- | --- |
 | Stay awake until manually stopped | `agenticmode` | Exact controller lifetime |
 | Finish Codex turns active at startup | `agenticmode current` | Exact observed turn lifecycle |
+| Finish OpenCode work active at startup | `agenticmode current` with the opt-in plugin | Exact published status and activity generation |
+| Finish supported one-shot agent commands | `agenticmode current` | Exact detected PID lifetime |
 | Run a new agent command | `agenticmode run -- command` | Exact top-level child PID lifetime unless manually stopped or cut off |
 | Wait for a known existing command | `agenticmode wait PID` | Exact supplied PID and process start time |
 | Include interactive agent sessions | `agenticmode current --process-policy session` | Conservative process lifetime |
@@ -106,7 +108,7 @@ For interactive agents, `run --` is the most reliable option. A long-lived inter
 
 ## How `current` detects runs
 
-macOS does not expose a universal concept of an agent run. `agenticmode current` therefore takes a read-only snapshot using two conservative detectors.
+macOS does not expose a universal concept of an agent run. `agenticmode current` therefore takes a read-only snapshot from Codex lifecycle records, activities published by installed harness integrations, and conservative process detection.
 
 ### Codex turns
 
@@ -118,6 +120,32 @@ The snapshot records exact turn IDs. Runs started later do not extend the wait. 
 
 The JSONL lifecycle format is an internal Codex detail, not a promised stable API. `agenticmode detect` shows what the current version can see. If a Codex update changes the format, use `agenticmode run -- ...` or `agenticmode wait PID` until the detector is updated.
 
+### OpenCode activities (opt-in)
+
+OpenCode exposes `busy`, `retry`, and `idle` session states to plugins. The included adapter publishes those events to agenticmode, allowing `current` to track an interactive OpenCode activity instead of the complete lifetime of its long-running TUI or server process.
+
+Install the adapter explicitly after installing agenticmode:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+cp ~/Documents/agenticmode/integrations/opencode/agenticmode.js \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agenticmode.js"
+```
+
+Restart OpenCode, start a prompt, and run `agenticmode detect` from another terminal to verify the activity. The `agenticmode` command must be on the `PATH` inherited by OpenCode. Set `AGENTICMODE_OPENCODE_DEBUG=1` before starting OpenCode to send adapter failures to its diagnostic output; adapter failures never block a session.
+
+The adapter treats `busy` and `retry` as active, and `idle` or deletion as finished. Each activation gets a unique generation, so later work in the same OpenCode session cannot extend a snapshot of earlier work. Records also include the OpenCode process ID and exact start time, preventing a crash, stale record, or reused PID from holding the awake lease. When a command runs inside OpenCode, the plugin identifies its exact source session so `current` excludes only its caller rather than every session sharing the OpenCode server process.
+
+This is exact relative to the lifecycle state published by OpenCode, not an independent guarantee that the harness itself never reports a stale state. The adapter uses the documented [OpenCode plugin event surface](https://opencode.ai/docs/plugins/).
+
+To remove the integration, quit OpenCode and delete the copied file:
+
+```bash
+rm "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agenticmode.js"
+```
+
+The main installer deliberately does not edit OpenCode configuration.
+
 ### Other agent CLIs
 
 The default `oneshot` process policy includes only command shapes that normally represent one run. It recognizes native executables and conservative shell, Node.js, Python module, npx, bunx, and uvx wrapper layouts:
@@ -128,6 +156,8 @@ The default `oneshot` process policy includes only command shapes that normally 
 - OpenCode with `run`
 
 Codex processes are not added as generic process targets because Codex desktop and interactive CLI processes can remain alive after a turn finishes.
+
+Interactive Claude Code turns are not currently treated as exact lifecycle activities. Claude's documented `Stop` hook does not fire on user interruption, hooks can block prompt submission or prevent a stop, and background work can outlive the main response. Those gaps can either allow sleep during continued work or leave sleep disabled while an interactive process waits at its prompt. Claude Code `-p`/`--print` remains supported by one-shot process detection; use `agenticmode run -- claude ...` or session process policy when full interactive-process lifetime is the safer boundary. See the official [Claude Code hooks lifecycle](https://code.claude.com/docs/en/hooks#hook-lifecycle).
 
 Use `--process-policy session` to wait for the full lifetime of recognized interactive sessions. Use `--process NAME` for another executable name, or put persistent custom names in `custom_process_names`. Explicit custom process names are treated as session processes, so they may remain active while waiting for input.
 
@@ -158,6 +188,7 @@ Supported keys:
 | `min_battery` | `0` | Stop percentage on battery, with `0` disabled |
 | `include_codex` | `1` | Enable Codex lifecycle detection |
 | `include_processes` | `1` | Enable known process detection |
+| `include_activities` | `1` | Enable activities published by installed harness integrations |
 | `process_policy` | `oneshot` | Use `oneshot` or `session` matching |
 | `process_names` | built-in list | Comma-separated executable names |
 | `custom_process_names` | empty | Extra executable names tracked for their full session lifetime |
@@ -239,7 +270,7 @@ agenticmode status --verbose
 agenticmode off
 ```
 
-Common causes are a long-lived interactive session selected with `process_policy=session`, an active Codex turn without a terminal lifecycle event, or an unsupported wrapper command. Prefer `agenticmode run -- command` for unusual tools and wrappers.
+Common causes are a long-lived interactive session selected with `process_policy=session`, an active Codex turn without a terminal lifecycle event, a missing OpenCode adapter or inherited `PATH`, or an unsupported wrapper command. Prefer `agenticmode run -- command` for unusual tools and wrappers.
 
 ## Development and contributions
 
@@ -249,7 +280,7 @@ Run the full suite without touching real power settings:
 ./tests/test_agenticmode.sh
 ```
 
-The suite replaces `pmset` and `sudo` with local fakes. It covers signal cleanup, `SIGKILL` recovery, immediate orphan shutdown and restart, delayed watchdog registration, atomic state locking, restoration retries and failures, baseline preservation, watchdog reassertion, long-poll interruption, controller conflicts, Codex deduplication, appended-only polling, caller exclusion, native and wrapped process detection, exact command and PID modes, cutoff exit statuses, battery query failures, config safety, installer ownership checks, and idempotent shutdown.
+The suite replaces `pmset` and `sudo` with local fakes. It covers signal cleanup, `SIGKILL` recovery, immediate orphan shutdown and restart, delayed watchdog registration, atomic state locking, restoration retries and failures, baseline preservation, watchdog reassertion, long-poll interruption, controller conflicts, Codex deduplication, appended-only polling, exact OpenCode activity generations, concurrent publication, stale and malicious activity records, caller exclusion with shared harness processes, native and wrapped process detection, exact command and PID modes, cutoff exit statuses, battery query failures, config safety, installer ownership checks, and idempotent shutdown.
 
 Forks and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Changes to `main` require the repository owner's review, and only `@ariakalantari` can merge.
 
