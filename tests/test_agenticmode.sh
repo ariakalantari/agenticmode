@@ -113,6 +113,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  pattern="$1"
+  file="$2"
+  if grep -Fq "$pattern" "$file"; then
+    printf 'Expected %s not to contain: %s\n' "$file" "$pattern" >&2
+    sed -n '1,200p' "$file" >&2
+    exit 1
+  fi
+}
+
 wait_for_contains() {
   pattern="$1"
   file="$2"
@@ -170,7 +180,7 @@ clear_codex_fixtures() {
 
 printf 'Test: syntax and version\n'
 /bin/bash -n "$repo_dir/bin/agenticmode" "$repo_dir/libexec/agenticmode-watchdog" "$repo_dir/install.sh" "$repo_dir/uninstall.sh"
-assert_equals "agenticmode 1.1.0" "$("$repo_dir/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.2.0" "$("$repo_dir/bin/agenticmode" --version)"
 
 printf 'Test: signal cleanup restores a normal baseline\n'
 "$repo_dir/bin/agenticmode" > "$test_root/interrupt.log" 2>&1 &
@@ -399,7 +409,7 @@ assert_contains "Power settings were not changed" "$test_root/no-target.log"
 printf 'Test: one-shot detector recognizes wrappers without prompt false positives\n'
 agent_bin="$test_root/agent-bin"
 mkdir -p "$agent_bin"
-for agent_script in claude node python opencode myagent; do
+for agent_script in claude claude.exe node python opencode opencode.exe myagent; do
   cat > "$agent_bin/$agent_script" <<'AGENT'
 #!/bin/bash
 /bin/sleep 8
@@ -407,17 +417,21 @@ AGENT
   chmod 755 "$agent_bin/$agent_script"
 done
 "$agent_bin/claude" -p task & claude_pid=$!
+"$agent_bin/claude.exe" --print task & claude_exe_pid=$!
 "$agent_bin/node" "$agent_bin/gemini.js" --prompt task & gemini_pid=$!
 "$agent_bin/python" -m aider --message task & aider_pid=$!
 "$agent_bin/opencode" run task & opencode_pid=$!
+"$agent_bin/opencode.exe" run task & opencode_exe_pid=$!
 "$agent_bin/python" -c claude -p & false_pid=$!
-agent_pids="$claude_pid $gemini_pid $aider_pid $opencode_pid $false_pid"
+agent_pids="$claude_pid $claude_exe_pid $gemini_pid $aider_pid $opencode_pid $opencode_exe_pid $false_pid"
 /bin/sleep 0.2
 "$repo_dir/bin/agenticmode" detect --no-codex > "$test_root/process-detect.log" 2>&1
 assert_contains "Process $claude_pid (claude" "$test_root/process-detect.log"
+assert_contains "Process $claude_exe_pid (claude" "$test_root/process-detect.log"
 assert_contains "Process $gemini_pid (gemini" "$test_root/process-detect.log"
 assert_contains "Process $aider_pid (aider" "$test_root/process-detect.log"
 assert_contains "Process $opencode_pid (opencode" "$test_root/process-detect.log"
+assert_contains "Process $opencode_exe_pid (opencode" "$test_root/process-detect.log"
 if grep -Fq "Process $false_pid" "$test_root/process-detect.log"; then
   printf 'Process detector matched provider text passed to python -c\n' >&2
   exit 1
@@ -430,6 +444,107 @@ assert_contains "Process $custom_pid (myagent" "$test_root/custom-process.log"
 for agent_pid in $agent_pids; do kill -TERM "$agent_pid" 2>/dev/null || true; done
 for agent_pid in $agent_pids; do wait "$agent_pid" 2>/dev/null || true; done
 agent_pids=""
+
+printf 'Test: lifecycle activities use exact caller exclusion with shared owners\n'
+"$repo_dir/bin/agenticmode" activity start opencode session-a "$$" generation-a
+"$repo_dir/bin/agenticmode" activity start opencode session-b "$$" generation-b
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-exclusion.log" 2>&1
+assert_contains "Detected 1 active run(s)" "$test_root/activity-exclusion.log"
+assert_contains "OpenCode activity session-b" "$test_root/activity-exclusion.log"
+assert_not_contains "OpenCode activity session-a" "$test_root/activity-exclusion.log"
+"$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-owner-fallback.log" 2>&1
+assert_contains "Detected 0 active run(s)" "$test_root/activity-owner-fallback.log"
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=session-a \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes --no-activities > "$test_root/activity-disabled.log" 2>&1
+assert_contains "Detected 0 active run(s)" "$test_root/activity-disabled.log"
+"$repo_dir/bin/agenticmode" activity stop opencode session-a "$$" generation-a
+"$repo_dir/bin/agenticmode" activity stop opencode session-b "$$" generation-b
+
+printf 'Test: activity generations prevent later work from extending a snapshot\n'
+"$repo_dir/bin/agenticmode" activity start opencode session-aba "$$" generation-old
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" current --no-codex --no-processes > "$test_root/activity-generation.log" 2>&1 &
+controller_pid=$!
+wait_for_value 1 "$pmset_state"
+wait_for_contains "OpenCode activity session-aba" "$test_root/activity-generation.log"
+"$repo_dir/bin/agenticmode" activity start opencode session-aba "$$" generation-new
+wait_for_exit "$controller_pid"
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+"$repo_dir/bin/agenticmode" activity stop opencode session-aba "$$" generation-old
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-stale-stop.log" 2>&1
+assert_contains "OpenCode activity session-aba" "$test_root/activity-stale-stop.log"
+"$repo_dir/bin/agenticmode" activity stop opencode session-aba "$$" generation-new
+
+printf 'Test: activity publication is atomic under concurrent detection\n'
+activity_publish_ready="$test_root/activity-publish.ready"
+env AGENTICMODE_TEST_ACTIVITY_PUBLISH_READY_FILE="$activity_publish_ready" \
+  AGENTICMODE_TEST_ACTIVITY_PUBLISH_DELAY=1 \
+  "$repo_dir/bin/agenticmode" activity start opencode session-atomic "$$" generation-atomic > "$test_root/activity-publish.log" 2>&1 &
+child_pid=$!
+attempts=0
+while [ ! -e "$activity_publish_ready" ] && [ "$attempts" -lt 80 ]; do
+  /bin/sleep 0.1
+  attempts=$((attempts + 1))
+done
+[ -e "$activity_publish_ready" ] || { printf 'Activity publication hook was not reached\n' >&2; exit 1; }
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-atomic.log" 2>&1
+wait "$child_pid"
+child_pid=""
+assert_contains "OpenCode activity session-atomic" "$test_root/activity-atomic.log"
+assert_not_contains "malformed activity" "$test_root/activity-atomic.log"
+"$repo_dir/bin/agenticmode" activity stop opencode session-atomic "$$" generation-atomic
+
+printf 'Test: dead owners and unsafe activity records are ignored\n'
+activity_publisher="$test_root/activity-publisher"
+activity_owner_ready="$test_root/activity-owner.ready"
+cat > "$activity_publisher" <<'ACTIVITY_PUBLISHER'
+#!/bin/bash
+set -eu
+"$AGENTICMODE_ACTIVITY_REPO/bin/agenticmode" activity start opencode dead-owner "$$" dead-generation
+: > "$AGENTICMODE_ACTIVITY_READY"
+while :; do /bin/sleep 1; done
+ACTIVITY_PUBLISHER
+chmod 755 "$activity_publisher"
+AGENTICMODE_ACTIVITY_REPO="$repo_dir" AGENTICMODE_ACTIVITY_READY="$activity_owner_ready" "$activity_publisher" &
+activity_owner_pid=$!
+agent_pids="$activity_owner_pid"
+attempts=0
+while [ ! -e "$activity_owner_ready" ] && [ "$attempts" -lt 80 ]; do
+  /bin/sleep 0.1
+  attempts=$((attempts + 1))
+done
+[ -e "$activity_owner_ready" ] || { printf 'Activity owner did not publish its marker\n' >&2; exit 1; }
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-live-owner.log" 2>&1
+assert_contains "OpenCode activity dead-owner" "$test_root/activity-live-owner.log"
+kill -KILL "$activity_owner_pid"
+wait "$activity_owner_pid" 2>/dev/null || true
+agent_pids=""
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-dead-owner.log" 2>&1
+assert_contains "Detected 0 active run(s)" "$test_root/activity-dead-owner.log"
+rm -f "$state_dir/activities/opencode~dead-owner.activity"
+ln -s "$test_root/missing-activity" "$state_dir/activities/opencode~unsafe-link.activity"
+printf '%s\n' 'bad|123|not-base64!' > "$state_dir/activities/opencode~unsafe-mode.activity"
+chmod 644 "$state_dir/activities/opencode~unsafe-mode.activity"
+AGENTICMODE_CALLER_ACTIVITY_HARNESS=opencode \
+  AGENTICMODE_CALLER_ACTIVITY_SOURCE=caller-session \
+  "$repo_dir/bin/agenticmode" detect --no-codex --no-processes > "$test_root/activity-unsafe.log" 2>&1
+assert_contains "Detected 0 active run(s)" "$test_root/activity-unsafe.log"
+assert_contains "ignored unsafe or malformed activity marker" "$test_root/activity-unsafe.log"
+rm -f "$state_dir/activities/opencode~unsafe-link.activity" "$state_dir/activities/opencode~unsafe-mode.activity"
 
 printf 'Test: current deduplicates Codex copies and ignores later turns\n'
 parent_fixture="$codex_home/sessions/2026/08/11/rollout-parent.jsonl"
@@ -553,10 +668,11 @@ printf 'AC Power\n' > "$power_source_file"
 
 printf 'Test: strict config parsing and precedence\n'
 config_file="$test_root/config"
-printf '%s\n' 'poll_seconds=7' 'timeout=2h' 'min_battery=20' > "$config_file"
+printf '%s\n' 'poll_seconds=7' 'timeout=2h' 'min_battery=20' 'include_activities=0' > "$config_file"
 chmod 644 "$config_file"
 config_output=$(AGENTICMODE_POLL_SECONDS=3 "$repo_dir/bin/agenticmode" config --config "$config_file" --poll 2)
 assert_equals 2 "$(printf '%s\n' "$config_output" | sed -n 's/^poll_seconds=//p')"
+assert_equals 0 "$(printf '%s\n' "$config_output" | sed -n 's/^include_activities=//p')"
 malicious_config="$test_root/malicious-config"
 printf '%s\n' 'min_battery=$(touch /tmp/agenticmode-must-not-execute)' > "$malicious_config"
 chmod 644 "$malicious_config"
@@ -630,7 +746,7 @@ mkdir -p "$empty_working_dir"
 ) > "$test_root/remote-install.log" 2>&1
 remote_root_canonical=$(CDPATH= cd -- "$remote_root" && pwd)
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/agenticmode")"
-assert_equals "agenticmode 1.1.0" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.2.0" "$("$remote_prefix/bin/agenticmode" --version)"
 [ -f "$remote_root/.agenticmode-remote-install" ] || { printf 'Remote installer marker was not created\n' >&2; exit 1; }
 PREFIX="$remote_prefix" "$remote_root/uninstall.sh" > "$test_root/remote-uninstall.log" 2>&1
 [ ! -e "$remote_prefix/bin/agenticmode" ] || { printf 'Remote uninstaller left the command symlink behind\n' >&2; exit 1; }

@@ -2,7 +2,7 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.1.0"
+readonly AGENTICMODE_VERSION="1.2.0"
 readonly AGENTICMODE_NAME="agenticmode"
 
 agentic_pmset=/usr/bin/pmset
@@ -45,6 +45,7 @@ agentic_timeout_seconds=0
 agentic_min_battery=0
 agentic_include_codex=1
 agentic_include_processes=1
+agentic_include_activities=1
 agentic_process_policy="oneshot"
 agentic_process_names="codex,claude,gemini,aider,opencode"
 agentic_custom_process_names=""
@@ -75,8 +76,11 @@ agentic_watchdog_stop_path_file="${agentic_state_root}/watchdog.stop-path"
 agentic_watchdog_leases_dir="${agentic_state_root}/watchdog-leases"
 agentic_stop_file="$agentic_legacy_stop_file"
 agentic_operation_file="${agentic_state_root}/operation.lockfile"
+agentic_activities_dir="${agentic_state_root}/activities"
+agentic_activities_lock_file="${agentic_state_root}/activities.lockfile"
 agentic_owns_controller=0
 agentic_owns_operation=0
+agentic_owns_activities_lock=0
 agentic_watchdog_pid=""
 agentic_timer_pid=""
 agentic_stop_reason=""
@@ -99,6 +103,12 @@ Usage:
   agenticmode detect [options]
       Show what `current` would track without changing power settings.
 
+  agenticmode activity start HARNESS SOURCE OWNER_PID GENERATION
+  agenticmode activity stop HARNESS SOURCE OWNER_PID GENERATION
+  agenticmode activity stop-source HARNESS SOURCE OWNER_PID
+  agenticmode activity stop-owner HARNESS OWNER_PID
+      Integration API for publishing active harness work. Does not change power settings.
+
   agenticmode status [--verbose]
   agenticmode doctor
   agenticmode config
@@ -113,6 +123,7 @@ Options:
   --process-policy MODE   `oneshot` (default) or `session`.
   --no-codex              Disable Codex JSONL lifecycle detection.
   --no-processes          Disable agent process detection.
+  --no-activities         Disable lifecycle activities published by integrations.
   --config PATH           Read a specific strict key=value config file.
   -h, --help              Show this help.
   -v, --version           Show the version.
@@ -172,6 +183,7 @@ apply_config_value() {
     MIN_BATTERY|min_battery) agentic_min_battery="$value" ;;
     INCLUDE_CODEX|include_codex) agentic_include_codex="$value" ;;
     INCLUDE_PROCESSES|include_processes) agentic_include_processes="$value" ;;
+    INCLUDE_ACTIVITIES|include_activities) agentic_include_activities="$value" ;;
     PROCESS_POLICY|process_policy) agentic_process_policy="$value" ;;
     PROCESS_NAMES|process_names) agentic_process_names="$value" ;;
     CUSTOM_PROCESS_NAMES|custom_process_names) agentic_custom_process_names="$value" ;;
@@ -212,6 +224,7 @@ load_config() {
   [ -z "${AGENTICMODE_CUSTOM_PROCESS_NAMES:-}" ] || agentic_custom_process_names="$AGENTICMODE_CUSTOM_PROCESS_NAMES"
   [ -z "${AGENTICMODE_INCLUDE_CODEX:-}" ] || agentic_include_codex="$AGENTICMODE_INCLUDE_CODEX"
   [ -z "${AGENTICMODE_INCLUDE_PROCESSES:-}" ] || agentic_include_processes="$AGENTICMODE_INCLUDE_PROCESSES"
+  [ -z "${AGENTICMODE_INCLUDE_ACTIVITIES:-}" ] || agentic_include_activities="$AGENTICMODE_INCLUDE_ACTIVITIES"
   [ -z "${AGENTICMODE_CODEX_STALE_SECONDS:-}" ] || agentic_codex_stale_seconds="$AGENTICMODE_CODEX_STALE_SECONDS"
 }
 
@@ -325,6 +338,7 @@ parse_cli() {
         ;;
       --no-codex) agentic_include_codex=0; shift ;;
       --no-processes) agentic_include_processes=0; shift ;;
+      --no-activities) agentic_include_activities=0; shift ;;
       --verbose)
         [ "$agentic_command" = "status" ] || fail "--verbose is only valid with status"
         agentic_command_args+=("--verbose")
@@ -364,6 +378,7 @@ validate_configuration() {
   [ "$agentic_min_battery" -ge 0 ] && [ "$agentic_min_battery" -le 100 ] || fail "min_battery must be from 0 to 100"
   case "$agentic_include_codex" in 0|1) ;; *) fail "include_codex must be 0 or 1" ;; esac
   case "$agentic_include_processes" in 0|1) ;; *) fail "include_processes must be 0 or 1" ;; esac
+  case "$agentic_include_activities" in 0|1) ;; *) fail "include_activities must be 0 or 1" ;; esac
   case "$agentic_process_policy" in oneshot|session) ;; *) fail "process_policy must be oneshot or session" ;; esac
   validate_process_name_list "$agentic_process_names" 0
   validate_process_name_list "$agentic_custom_process_names" 1
@@ -473,6 +488,211 @@ read_numeric_file() {
   IFS= read -r value < "$file" || return 1
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+valid_activity_field() {
+  local value="$1" maximum="$2"
+  case "$value" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#value}" -le "$maximum" ]
+}
+
+activity_marker_path() {
+  printf '%s/%s~%s.activity\n' "$agentic_activities_dir" "$1" "$2"
+}
+
+activities_storage_is_safe() {
+  local owner mode group_digit other_digit path
+  for path in "$agentic_state_root" "$agentic_activities_dir"; do
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    owner=$("$agentic_stat" -f '%u' "$path" 2>/dev/null) || return 1
+    [ "$owner" = "$UID" ] || return 1
+    mode=$("$agentic_stat" -f '%Lp' "$path" 2>/dev/null) || return 1
+    group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+    other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+    [ "$group_digit$other_digit" = "00" ] || return 1
+  done
+}
+
+validate_activities_storage() {
+  validate_state_root
+  [ ! -L "$agentic_activities_dir" ] || fail "refusing symlinked activities directory"
+  if [ ! -e "$agentic_activities_dir" ]; then
+    mkdir "$agentic_activities_dir" || fail "could not create the activities directory"
+    chmod 700 "$agentic_activities_dir" || fail "could not secure the activities directory"
+  fi
+  activities_storage_is_safe || fail "activities storage must be private, user-owned, and free of symlinks"
+}
+
+acquire_activities_lock() {
+  local owner mode group_digit other_digit lock_status=0
+  validate_activities_storage
+  [ "$agentic_owns_activities_lock" -eq 0 ] || return 0
+  if [ -e "$agentic_activities_lock_file" ] || [ -L "$agentic_activities_lock_file" ]; then
+    [ -f "$agentic_activities_lock_file" ] && [ ! -L "$agentic_activities_lock_file" ] || fail "the activities lock must be a regular file"
+    owner=$("$agentic_stat" -f '%u' "$agentic_activities_lock_file" 2>/dev/null) || fail "could not inspect the activities lock"
+    [ "$owner" = "$UID" ] || fail "activities lock must be owned by your user"
+    mode=$("$agentic_stat" -f '%Lp' "$agentic_activities_lock_file" 2>/dev/null) || fail "could not inspect activities lock permissions"
+    group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+    other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+    [ "$group_digit$other_digit" = "00" ] || fail "activities lock must not be accessible by group or other users"
+  fi
+  umask 077
+  exec 8>"$agentic_activities_lock_file" || fail "could not open the activities lock"
+  "$agentic_lockf" -s -t 5 8 || lock_status=$?
+  if [ "$lock_status" -ne 0 ]; then
+    exec 8>&-
+    fail "another agent activity update is still in progress"
+  fi
+  agentic_owns_activities_lock=1
+}
+
+release_activities_lock() {
+  [ "$agentic_owns_activities_lock" -eq 1 ] || return 0
+  exec 8>&-
+  agentic_owns_activities_lock=0
+}
+
+read_activity_record() {
+  local marker="$1" owner mode group_digit other_digit line lines extra
+  activity_record_generation=""
+  activity_record_owner_pid=""
+  activity_record_owner_started=""
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  owner=$("$agentic_stat" -f '%u' "$marker" 2>/dev/null) || return 1
+  [ "$owner" = "$UID" ] || return 1
+  mode=$("$agentic_stat" -f '%Lp' "$marker" 2>/dev/null) || return 1
+  group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  [ "$group_digit$other_digit" = "00" ] || return 1
+  lines=$("$agentic_awk" 'END { print NR+0 }' "$marker" 2>/dev/null) || return 1
+  [ "$lines" = "1" ] || return 1
+  IFS= read -r line < "$marker" || return 1
+  IFS='|' read -r activity_record_generation activity_record_owner_pid activity_record_owner_started extra <<EOF
+$line
+EOF
+  [ -z "$extra" ] || return 1
+  valid_activity_field "$activity_record_generation" 180 || return 1
+  case "$activity_record_owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$activity_record_owner_pid" -gt 1 ] || return 1
+  case "$activity_record_owner_started" in ''|*[!A-Za-z0-9+/=]*) return 1 ;; esac
+}
+
+activity_owner_is_allowed() {
+  local owner_pid="$1" owner_uid owner_state next parent
+  case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$owner_pid" -gt 1 ] || return 1
+  owner_uid=$("$agentic_ps" -p "$owner_pid" -o uid= 2>/dev/null | "$agentic_awk" '{print $1}')
+  [ "$owner_uid" = "$UID" ] || return 1
+  owner_state=$("$agentic_ps" -p "$owner_pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+  [ -n "$owner_state" ] && [ "$owner_state" != "Z" ] || return 1
+  next="$$"
+  while :; do
+    [ "$next" != "$owner_pid" ] || return 0
+    parent=$("$agentic_ps" -p "$next" -o ppid= 2>/dev/null | "$agentic_awk" '{print $1}')
+    case "$parent" in ''|0|1|*[!0-9]*) break ;; esac
+    next="$parent"
+  done
+  return 1
+}
+
+validate_activity_identity() {
+  valid_activity_field "$1" 32 || fail "invalid activity harness: $1"
+  valid_activity_field "$2" 180 || fail "invalid activity source: $2"
+}
+
+activity_start() {
+  local harness="$1" source="$2" owner_pid="$3" generation="$4" owner_started encoded_started marker temporary
+  validate_activity_identity "$harness" "$source"
+  valid_activity_field "$generation" 180 || fail "invalid activity generation: $generation"
+  activity_owner_is_allowed "$owner_pid" || fail "activity owner must be this process or one of its live ancestors"
+  owner_started=$(process_started_value "$owner_pid")
+  [ -n "$owner_started" ] || fail "could not identify the activity owner process"
+  encoded_started=$(encode_path "$owner_started")
+  acquire_activities_lock
+  marker=$(activity_marker_path "$harness" "$source")
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    read_activity_record "$marker" || { release_activities_lock || true; fail "refusing an unsafe or malformed activity marker"; }
+    if [ "$activity_record_generation" = "$generation" ] && [ "$activity_record_owner_pid" = "$owner_pid" ] && [ "$activity_record_owner_started" = "$encoded_started" ]; then
+      release_activities_lock
+      return 0
+    fi
+  fi
+  temporary=$(mktemp "$agentic_activities_dir/.publish.XXXXXX") || { release_activities_lock || true; fail "could not allocate an activity marker"; }
+  printf '%s|%s|%s\n' "$generation" "$owner_pid" "$encoded_started" > "$temporary" || { rm -f "$temporary"; release_activities_lock || true; fail "could not write an activity marker"; }
+  chmod 600 "$temporary" || { rm -f "$temporary"; release_activities_lock || true; fail "could not secure an activity marker"; }
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_ACTIVITY_PUBLISH_READY_FILE:-}" ]; then
+    : > "$AGENTICMODE_TEST_ACTIVITY_PUBLISH_READY_FILE"
+  fi
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_ACTIVITY_PUBLISH_DELAY:-}" ]; then
+    "$agentic_sleep" "$AGENTICMODE_TEST_ACTIVITY_PUBLISH_DELAY"
+  fi
+  mv "$temporary" "$marker" || { rm -f "$temporary"; release_activities_lock || true; fail "could not publish an activity marker"; }
+  release_activities_lock
+}
+
+activity_stop() {
+  local harness="$1" source="$2" owner_pid="$3" expected_generation="${4:-}" owner_started encoded_started marker
+  validate_activity_identity "$harness" "$source"
+  [ -z "$expected_generation" ] || valid_activity_field "$expected_generation" 180 || fail "invalid activity generation: $expected_generation"
+  activity_owner_is_allowed "$owner_pid" || fail "activity owner must be this process or one of its live ancestors"
+  owner_started=$(process_started_value "$owner_pid")
+  [ -n "$owner_started" ] || fail "could not identify the activity owner process"
+  encoded_started=$(encode_path "$owner_started")
+  acquire_activities_lock
+  marker=$(activity_marker_path "$harness" "$source")
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    release_activities_lock
+    return 0
+  fi
+  read_activity_record "$marker" || { release_activities_lock || true; fail "refusing an unsafe or malformed activity marker"; }
+  if [ "$activity_record_owner_pid" = "$owner_pid" ] && [ "$activity_record_owner_started" = "$encoded_started" ] && { [ -z "$expected_generation" ] || [ "$activity_record_generation" = "$expected_generation" ]; }; then
+    rm -f "$marker" || { release_activities_lock || true; fail "could not remove an activity marker"; }
+  fi
+  release_activities_lock
+}
+
+activity_stop_owner() {
+  local harness="$1" owner_pid="$2" owner_started encoded_started marker name marker_harness
+  valid_activity_field "$harness" 32 || fail "invalid activity harness: $harness"
+  activity_owner_is_allowed "$owner_pid" || fail "activity owner must be this process or one of its live ancestors"
+  owner_started=$(process_started_value "$owner_pid")
+  [ -n "$owner_started" ] || fail "could not identify the activity owner process"
+  encoded_started=$(encode_path "$owner_started")
+  acquire_activities_lock
+  for marker in "$agentic_activities_dir"/*.activity; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    name=${marker##*/}
+    marker_harness=${name%%~*}
+    [ "$marker_harness" = "$harness" ] || continue
+    read_activity_record "$marker" || { release_activities_lock || true; fail "refusing an unsafe or malformed activity marker"; }
+    if [ "$activity_record_owner_pid" = "$owner_pid" ] && [ "$activity_record_owner_started" = "$encoded_started" ]; then
+      rm -f "$marker" || { release_activities_lock || true; fail "could not remove an activity marker"; }
+    fi
+  done
+  release_activities_lock
+}
+
+run_activity_api() {
+  local action="${1:-}"
+  case "$action" in
+    start)
+      [ "$#" -eq 5 ] || fail "activity start requires HARNESS SOURCE OWNER_PID GENERATION"
+      activity_start "$2" "$3" "$4" "$5"
+      ;;
+    stop)
+      [ "$#" -eq 5 ] || fail "activity stop requires HARNESS SOURCE OWNER_PID GENERATION"
+      activity_stop "$2" "$3" "$4" "$5"
+      ;;
+    stop-source)
+      [ "$#" -eq 4 ] || fail "activity stop-source requires HARNESS SOURCE OWNER_PID"
+      activity_stop "$2" "$3" "$4"
+      ;;
+    stop-owner)
+      [ "$#" -eq 3 ] || fail "activity stop-owner requires HARNESS OWNER_PID"
+      activity_stop_owner "$2" "$3"
+      ;;
+    *) fail "unknown activity action: ${action:-missing}" ;;
+  esac
 }
 
 controller_identity_matches() {
@@ -1082,6 +1302,7 @@ snapshot_active_agent_processes() {
       result=value
       sub(/^.*\//, "", result)
       sub(/\.(js|mjs|cjs)$/, "", result)
+      sub(/\.exe$/, "", result)
       if (result == "gemini-cli") result="gemini"
       else if (result == "claude-code") result="claude"
       else if (result == "aider-chat") result="aider"
@@ -1145,6 +1366,43 @@ $process_output
 EOF
 }
 
+snapshot_active_activities() {
+  local ancestors caller_harness caller_source exact_caller=0 marker name key harness source owner_started
+  ancestors=$(ancestor_pid_list)
+  caller_harness="${AGENTICMODE_CALLER_ACTIVITY_HARNESS:-}"
+  caller_source="${AGENTICMODE_CALLER_ACTIVITY_SOURCE:-}"
+  if valid_activity_field "$caller_harness" 32 && valid_activity_field "$caller_source" 180; then
+    exact_caller=1
+  fi
+  acquire_activities_lock
+  for marker in "$agentic_activities_dir"/*.activity; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    name=${marker##*/}
+    key=${name%.activity}
+    case "$key" in *'~'*) ;; *) warn "ignored malformed activity marker: $name"; continue ;; esac
+    harness=${key%%~*}
+    source=${key#*~}
+    if ! valid_activity_field "$harness" 32 || ! valid_activity_field "$source" 180 || [ "$name" != "$harness~$source.activity" ]; then
+      warn "ignored malformed activity marker: $name"
+      continue
+    fi
+    if ! read_activity_record "$marker"; then
+      warn "ignored unsafe or malformed activity marker: $name"
+      continue
+    fi
+    owner_started=$(decode_path "$activity_record_owner_started")
+    [ -n "$owner_started" ] || { warn "ignored activity marker with an invalid process identity: $name"; continue; }
+    process_target_is_active "$activity_record_owner_pid" "$owner_started" || continue
+    if [ "$exact_caller" -eq 1 ]; then
+      [ "$harness" != "$caller_harness" ] || [ "$source" != "$caller_source" ] || continue
+    else
+      case "$ancestors" in *",${activity_record_owner_pid},"*) continue ;; esac
+    fi
+    printf 'activity|%s|%s|%s|%s|%s\n' "$harness" "$source" "$activity_record_generation" "$activity_record_owner_pid" "$activity_record_owner_started"
+  done
+  release_activities_lock
+}
+
 snapshot_explicit_pids() {
   local old_ifs pid started name
   [ -n "$agentic_extra_pids" ] || return 0
@@ -1162,6 +1420,7 @@ snapshot_explicit_pids() {
 snapshot_targets() {
   [ "$agentic_include_codex" -eq 0 ] || snapshot_active_codex_turns || return 1
   [ "$agentic_include_processes" -eq 0 ] || snapshot_active_agent_processes || return 1
+  [ "$agentic_include_activities" -eq 0 ] || snapshot_active_activities || return 1
   snapshot_explicit_pids || return 1
 }
 
@@ -1219,6 +1478,19 @@ process_target_is_active() {
   [ "$actual_start" = "$expected_start" ]
 }
 
+activity_target_is_active() {
+  local harness="$1" source="$2" expected_generation="$3" expected_pid="$4" expected_started="$5" marker owner_started
+  activities_storage_is_safe || return 1
+  marker=$(activity_marker_path "$harness" "$source")
+  read_activity_record "$marker" || return 1
+  [ "$activity_record_generation" = "$expected_generation" ] || return 1
+  [ "$activity_record_owner_pid" = "$expected_pid" ] || return 1
+  [ "$activity_record_owner_started" = "$expected_started" ] || return 1
+  owner_started=$(decode_path "$expected_started")
+  [ -n "$owner_started" ] || return 1
+  process_target_is_active "$expected_pid" "$owner_started"
+}
+
 remaining_target_count() {
   local kind first second third fourth fifth count=0
   [ -r "$agentic_targets_file" ] || { printf '0\n'; return; }
@@ -1226,6 +1498,7 @@ remaining_target_count() {
     case "$kind" in
       codex) codex_target_is_active "$first" "$second" "$fourth" "$fifth" && count=$((count + 1)) ;;
       process) process_target_is_active "$first" "$second" && count=$((count + 1)) ;;
+      activity) activity_target_is_active "$first" "$second" "$third" "$fourth" "$fifth" && count=$((count + 1)) ;;
     esac
   done < "$agentic_targets_file"
   printf '%s\n' "$count"
@@ -1245,6 +1518,10 @@ show_targets_file() {
         say "Codex turn $first (exact lifecycle, ${label%.jsonl})"
         ;;
       process) say "Process $first ($third, exact PID and start time)" ;;
+      activity)
+        case "$first" in opencode) label="OpenCode" ;; *) label="$first" ;; esac
+        say "$label activity $second (published lifecycle, exact generation and process identity)"
+        ;;
     esac
   done < "$file"
 }
@@ -1452,6 +1729,7 @@ show_effective_config() {
   say "min_battery=$agentic_min_battery"
   say "include_codex=$agentic_include_codex"
   say "include_processes=$agentic_include_processes"
+  say "include_activities=$agentic_include_activities"
   say "process_policy=$agentic_process_policy"
   say "process_names=$agentic_process_names"
   say "custom_process_names=$agentic_custom_process_names"
@@ -1484,6 +1762,11 @@ main() {
     help|-h|--help) usage; exit 0 ;;
     version|-v|--version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION"; exit 0 ;;
   esac
+  if [ "${1:-}" = "activity" ]; then
+    shift
+    run_activity_api "$@"
+    exit 0
+  fi
   find_config_argument "$@"
   case "${1:-}" in off|status) ;; *) load_config ;; esac
   parse_cli "$@"

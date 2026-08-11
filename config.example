@@ -6,6 +6,7 @@ timeout=0
 min_battery=0
 include_codex=1
 include_processes=1
+include_activities=1
 process_policy=oneshot
 process_names=codex,claude,gemini,aider,opencode
 custom_process_names=
