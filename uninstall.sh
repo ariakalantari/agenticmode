@@ -54,7 +54,14 @@ fi
 
 if [ -f "$remote_marker" ] && [ ! -L "$remote_marker" ]; then
   marker_header=$(/usr/bin/sed -n '1p' "$remote_marker" 2>/dev/null || true)
-  marker_root=$(/usr/bin/sed -n '2p' "$remote_marker" 2>/dev/null || true)
+  case "$marker_header" in
+    agenticmode-remote-install:v2)
+      marker_root=$(/usr/bin/sed -n '3p' "$remote_marker" 2>/dev/null || true)
+      ;;
+    agenticmode-remote-install:*)
+      marker_root=$(/usr/bin/sed -n '2p' "$remote_marker" 2>/dev/null || true)
+      ;;
+  esac
   case "$marker_header" in
     agenticmode-remote-install:*)
       [ "$marker_root" = "$script_dir" ] || {

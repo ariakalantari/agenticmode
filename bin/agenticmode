@@ -2,8 +2,10 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.2.0"
+readonly AGENTICMODE_VERSION="1.3.0"
 readonly AGENTICMODE_NAME="agenticmode"
+readonly AGENTICMODE_FORMULA="ariakalantari/agenticmode/agenticmode"
+readonly AGENTICMODE_RELEASE_BASE_URL="https://github.com/ariakalantari/agenticmode/releases"
 
 agentic_pmset=/usr/bin/pmset
 agentic_sudo=/usr/bin/sudo
@@ -20,6 +22,10 @@ agentic_base64=/usr/bin/base64
 agentic_sqlite=/usr/bin/sqlite3
 agentic_lockf=/usr/bin/lockf
 agentic_tr=/usr/bin/tr
+agentic_curl=/usr/bin/curl
+agentic_shasum=/usr/bin/shasum
+agentic_tar=/usr/bin/tar
+agentic_cmp=/usr/bin/cmp
 if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_pmset="${AGENTICMODE_PMSET_BIN:-$agentic_pmset}"
   agentic_sudo="${AGENTICMODE_SUDO_BIN:-$agentic_sudo}"
@@ -34,6 +40,10 @@ if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_stat="${AGENTICMODE_STAT_BIN:-$agentic_stat}"
   agentic_base64="${AGENTICMODE_BASE64_BIN:-$agentic_base64}"
   agentic_sqlite="${AGENTICMODE_SQLITE_BIN:-$agentic_sqlite}"
+  agentic_curl="${AGENTICMODE_CURL_BIN:-$agentic_curl}"
+  agentic_shasum="${AGENTICMODE_SHASUM_BIN:-$agentic_shasum}"
+  agentic_tar="${AGENTICMODE_TAR_BIN:-$agentic_tar}"
+  agentic_cmp="${AGENTICMODE_CMP_BIN:-$agentic_cmp}"
 fi
 agentic_watchdog_bin=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
 [ "${AGENTICMODE_TESTING:-0}" != "1" ] || agentic_watchdog_bin="${AGENTICMODE_WATCHDOG_BIN:-$agentic_watchdog_bin}"
@@ -86,6 +96,7 @@ agentic_watchdog_pid=""
 agentic_timer_pid=""
 agentic_stop_reason=""
 agentic_finished_targets=""
+agentic_update_temporary=""
 
 agentic_stdout_reset=""
 agentic_stdout_cyan=""
@@ -139,6 +150,7 @@ Usage:
   agenticmode status [--verbose | --machine]
   agenticmode doctor
   agenticmode config
+  agenticmode update
   agenticmode off
 
 Options:
@@ -523,20 +535,20 @@ bundled_watchdog_path() {
 ensure_watchdog_install() {
   local bundled owner mode group_digit other_digit
   [ ! -L "$agentic_watchdog_bin" ] || fail "refusing a symlinked privileged watchdog"
-  if [ -f "$agentic_watchdog_bin" ]; then
-    validate_watchdog_install
-    return 0
-  fi
-  [ "${AGENTICMODE_TESTING:-0}" != "1" ] || return 0
   bundled=$(bundled_watchdog_path) || fail "could not locate the bundled safety watchdog"
   [ -f "$bundled" ] && [ -x "$bundled" ] && [ ! -L "$bundled" ] || fail "the bundled safety watchdog is missing or unsafe; re-run ./install.sh"
+  if [ -f "$agentic_watchdog_bin" ]; then
+    validate_watchdog_install
+    "$agentic_cmp" -s "$bundled" "$agentic_watchdog_bin" && return 0
+  fi
+  [ "${AGENTICMODE_TESTING:-0}" != "1" ] || return 0
   owner=$("$agentic_stat" -f '%u' "$bundled" 2>/dev/null) || fail "cannot inspect the bundled safety watchdog"
   [ "$owner" = "$UID" ] || fail "the bundled safety watchdog must be owned by your user"
   mode=$("$agentic_stat" -f '%Lp' "$bundled" 2>/dev/null) || fail "cannot inspect bundled watchdog permissions"
   group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
   other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
   case "$group_digit$other_digit" in *2*|*3*|*6*|*7*) fail "the bundled safety watchdog must not be group- or world-writable" ;; esac
-  status_working "Installing the root-owned safety watchdog. macOS may ask for your password."
+  status_working "Installing the current root-owned safety watchdog. macOS may ask for your password."
   "$agentic_sudo" -v || fail "administrator authentication failed"
   "$agentic_sudo" /usr/bin/install -o root -g wheel -m 755 "$bundled" "$agentic_watchdog_bin" || fail "could not install the safety watchdog"
   validate_watchdog_install
@@ -1976,6 +1988,283 @@ show_effective_config() {
   say "watchdog=$agentic_watchdog_bin"
 }
 
+resolve_executable_path() {
+  local resolved="$1" link directory attempts=0
+  case "$resolved" in
+    /*) ;;
+    */*) resolved="$(pwd)/$resolved" ;;
+    *) resolved=$(command -v "$resolved" 2>/dev/null) || return 1 ;;
+  esac
+  while [ -L "$resolved" ] && [ "$attempts" -lt 20 ]; do
+    link=$(/usr/bin/readlink "$resolved") || return 1
+    case "$link" in
+      /*) resolved="$link" ;;
+      *) resolved="${resolved%/*}/$link" ;;
+    esac
+    attempts=$((attempts + 1))
+  done
+  [ ! -L "$resolved" ] || return 1
+  directory=$(CDPATH= cd -- "${resolved%/*}" 2>/dev/null && pwd) || return 1
+  printf '%s/%s\n' "$directory" "${resolved##*/}"
+}
+
+version_is_newer() {
+  local candidate="$1" current="$2" candidate_major candidate_minor candidate_patch current_major current_minor current_patch remainder
+  case "$candidate:$current" in
+    *[!0-9.:]*) return 2 ;;
+  esac
+  case "$candidate" in *.*.*) remainder=${candidate#*.}; remainder=${remainder#*.}; case "$remainder" in *.*) return 2 ;; esac ;; *) return 2 ;; esac
+  case "$current" in *.*.*) remainder=${current#*.}; remainder=${remainder#*.}; case "$remainder" in *.*) return 2 ;; esac ;; *) return 2 ;; esac
+  IFS=. read -r candidate_major candidate_minor candidate_patch <<EOF
+$candidate
+EOF
+  IFS=. read -r current_major current_minor current_patch <<EOF
+$current
+EOF
+  [ -n "$candidate_major" ] && [ -n "$candidate_minor" ] && [ -n "$candidate_patch" ] || return 2
+  [ -n "$current_major" ] && [ -n "$current_minor" ] && [ -n "$current_patch" ] || return 2
+  if [ "$candidate_major" -ne "$current_major" ]; then
+    [ "$candidate_major" -gt "$current_major" ]
+  elif [ "$candidate_minor" -ne "$current_minor" ]; then
+    [ "$candidate_minor" -gt "$current_minor" ]
+  else
+    [ "$candidate_patch" -gt "$current_patch" ]
+  fi
+}
+
+validate_update_state() {
+  local state
+  validate_host
+  validate_state_root
+  if controller_identity_matches || watchdog_identity_matches; then
+    fail "agentic mode is active; run agenticmode off before updating"
+  fi
+  state=$(sleep_disabled_value) || fail "could not verify the macOS SleepDisabled state before updating"
+  [ "$state" = "0" ] || fail "SleepDisabled is still on; run agenticmode off before updating"
+}
+
+load_managed_install() {
+  local executable root marker header channel marker_root prefix extra owner mode group_digit other_digit path target link
+  executable=$(resolve_executable_path "$0") || return 1
+  case "$executable" in
+    */bin/agenticmode) root=${executable%/bin/agenticmode} ;;
+    *) return 1 ;;
+  esac
+  marker="$root/.agenticmode-remote-install"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "managed install metadata is not a regular file"
+  owner=$("$agentic_stat" -f '%u' "$marker" 2>/dev/null) || fail "cannot inspect managed install metadata"
+  [ "$owner" = "$UID" ] || fail "managed install metadata must be owned by your user"
+  mode=$("$agentic_stat" -f '%Lp' "$marker" 2>/dev/null) || fail "cannot inspect managed install metadata permissions"
+  group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  case "$group_digit$other_digit" in *2*|*3*|*6*|*7*) fail "managed install metadata must not be group- or world-writable" ;; esac
+  header=$("$agentic_sed" -n '1p' "$marker")
+  case "$header" in
+    agenticmode-remote-install:*)
+      [ "$header" = "agenticmode-remote-install:v2" ] || fail "managed install metadata is outdated; rerun the direct installer once before using update"
+      ;;
+    *) fail "managed install metadata is malformed" ;;
+  esac
+  channel=$("$agentic_sed" -n '2p' "$marker")
+  marker_root=$("$agentic_sed" -n '3p' "$marker")
+  prefix=$("$agentic_sed" -n '4p' "$marker")
+  extra=$("$agentic_sed" -n '5p' "$marker")
+  [ -z "$extra" ] || fail "managed install metadata has unexpected content"
+  case "$channel" in
+    stable) ;;
+    pinned:*)
+      case "${channel#pinned:}" in ''|*..*|*[!A-Za-z0-9._-]*) fail "managed install channel is invalid" ;; esac
+      ;;
+    *) fail "managed install channel is invalid" ;;
+  esac
+  [ "$marker_root" = "$root" ] || fail "managed install metadata does not match the executing CLI"
+  case "$root:$prefix" in
+    /*:/*) ;;
+    *) fail "managed install paths must be absolute" ;;
+  esac
+  case "$root" in /|"$HOME") fail "refusing unsafe managed install root: $root" ;; esac
+  case "$prefix" in /|"$HOME") fail "refusing unsafe managed install prefix: $prefix" ;; esac
+  for path in "$root" "$root/bin" "$root/libexec" "$prefix" "$prefix/bin"; do
+    [ -d "$path" ] && [ ! -L "$path" ] || fail "managed install directory is missing or unsafe: $path"
+    owner=$("$agentic_stat" -f '%u' "$path" 2>/dev/null) || fail "cannot inspect managed install directory: $path"
+    [ "$owner" = "$UID" ] || fail "managed install directory must be owned by your user: $path"
+  done
+  for path in "$root/install.sh" "$root/uninstall.sh" "$root/config.example" "$root/bin/agenticmode" "$root/libexec/agenticmode-watchdog"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "managed install file is missing or unsafe: $path"
+    owner=$("$agentic_stat" -f '%u' "$path" 2>/dev/null) || fail "cannot inspect managed install file: $path"
+    [ "$owner" = "$UID" ] || fail "managed install file must be owned by your user: $path"
+  done
+  for target in "$prefix/bin/agenticmode" "$prefix/bin/am"; do
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      [ -L "$target" ] || fail "refusing to replace non-symlink command: $target"
+      link=$(/usr/bin/readlink "$target") || fail "cannot inspect command symlink: $target"
+      [ "$link" = "$root/bin/agenticmode" ] || fail "command symlink belongs to another installation: $target"
+    fi
+  done
+  agentic_managed_root="$root"
+  agentic_managed_prefix="$prefix"
+  agentic_managed_channel="$channel"
+  return 0
+}
+
+find_homebrew_install() {
+  local brew executable formula_prefix formula_executable
+  if [ -n "${AGENTICMODE_BREW_BIN:-}" ] && [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
+    brew="$AGENTICMODE_BREW_BIN"
+  else
+    brew=$(command -v brew 2>/dev/null) || return 1
+  fi
+  [ -x "$brew" ] || return 1
+  executable=$(resolve_executable_path "$0") || return 1
+  formula_prefix=$("$brew" --prefix "$AGENTICMODE_FORMULA" 2>/dev/null) || return 1
+  formula_executable=$(resolve_executable_path "$formula_prefix/bin/agenticmode") || return 1
+  [ "$formula_executable" = "$executable" ] || return 1
+  agentic_update_brew="$brew"
+  return 0
+}
+
+run_homebrew_update() {
+  local formula_prefix updated_version
+  status_working "Refreshing Homebrew and checking for agenticmode updates."
+  "$agentic_update_brew" update || fail "Homebrew could not refresh formula metadata"
+  "$agentic_update_brew" upgrade --formula "$AGENTICMODE_FORMULA" || fail "Homebrew could not upgrade agenticmode"
+  formula_prefix=$("$agentic_update_brew" --prefix "$AGENTICMODE_FORMULA" 2>/dev/null) || fail "Homebrew no longer reports an agenticmode installation"
+  updated_version=$("$formula_prefix/bin/agenticmode" --version 2>/dev/null) || fail "the updated Homebrew command could not report its version"
+  status_ok "Homebrew update complete: $updated_version."
+}
+
+validate_release_archive() {
+  local archive="$1" extract_root="$2" listing="$3" entry path
+  "$agentic_tar" -tzf "$archive" > "$listing" || fail "the release archive could not be inspected"
+  while IFS= read -r entry; do
+    case "$entry" in
+      agenticmode|agenticmode/|agenticmode/bin|agenticmode/bin/|agenticmode/libexec|agenticmode/libexec/|\
+      agenticmode/install.sh|agenticmode/uninstall.sh|agenticmode/config.example|\
+      agenticmode/bin/agenticmode|agenticmode/libexec/agenticmode-watchdog) ;;
+      *) fail "the release archive contains an unexpected path: $entry" ;;
+    esac
+  done < "$listing"
+  "$agentic_tar" -xzf "$archive" -C "$extract_root" || fail "the release archive could not be extracted"
+  for path in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+    [ -f "$extract_root/agenticmode/$path" ] && [ ! -L "$extract_root/agenticmode/$path" ] || fail "the release archive is missing a safe $path"
+  done
+  /bin/bash -n "$extract_root/agenticmode/install.sh" "$extract_root/agenticmode/uninstall.sh" \
+    "$extract_root/agenticmode/bin/agenticmode" "$extract_root/agenticmode/libexec/agenticmode-watchdog" || \
+    fail "the release archive failed shell syntax validation"
+}
+
+restore_managed_files() {
+  local root="$1" backup="$2" relative destination temporary mode
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+    destination="$root/$relative"
+    temporary="${destination}.rollback.$$"
+    case "$relative" in config.example) mode=644 ;; *) mode=755 ;; esac
+    /usr/bin/install -m "$mode" "$backup/$relative" "$temporary" 2>/dev/null || continue
+    /bin/mv -f "$temporary" "$destination" 2>/dev/null || true
+  done
+}
+
+cleanup_update_temporary() {
+  [ -z "$agentic_update_temporary" ] || rm -rf "$agentic_update_temporary"
+}
+
+run_managed_update() {
+  local release_base temporary archive checksum_file checksum actual_checksum extract_root staged backup
+  local new_version_output new_version relative destination replacement mode
+  case "$agentic_managed_channel" in
+    stable) ;;
+    pinned:*) fail "this direct install is pinned to ${agentic_managed_channel#pinned:}; reinstall without AGENTICMODE_INSTALL_REF to follow stable releases" ;;
+  esac
+  release_base="$AGENTICMODE_RELEASE_BASE_URL"
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_RELEASE_BASE_URL:-}" ]; then
+    release_base=${AGENTICMODE_TEST_RELEASE_BASE_URL%/}
+  fi
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/agenticmode-update.XXXXXX") || fail "could not create a private update directory"
+  agentic_update_temporary="$temporary"
+  trap cleanup_update_temporary EXIT
+  chmod 700 "$temporary" || { rm -rf "$temporary"; fail "could not secure the update directory"; }
+  archive="$temporary/agenticmode.tar.gz"
+  checksum_file="$temporary/agenticmode.tar.gz.sha256"
+  extract_root="$temporary/extract"
+  backup="$temporary/backup"
+  mkdir -p "$extract_root" "$backup/bin" "$backup/libexec" || { rm -rf "$temporary"; fail "could not prepare the update directory"; }
+  status_working "Downloading the latest stable agenticmode release."
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
+    "$agentic_curl" -fsSL "$release_base/latest/download/agenticmode.tar.gz.sha256" -o "$checksum_file" || { rm -rf "$temporary"; fail "could not download the release checksum"; }
+    "$agentic_curl" -fsSL "$release_base/latest/download/agenticmode.tar.gz" -o "$archive" || { rm -rf "$temporary"; fail "could not download the release archive"; }
+  else
+    "$agentic_curl" -fsSL --proto '=https' --tlsv1.2 "$release_base/latest/download/agenticmode.tar.gz.sha256" -o "$checksum_file" || { rm -rf "$temporary"; fail "could not download the release checksum"; }
+    "$agentic_curl" -fsSL --proto '=https' --tlsv1.2 "$release_base/latest/download/agenticmode.tar.gz" -o "$archive" || { rm -rf "$temporary"; fail "could not download the release archive"; }
+  fi
+  checksum=$("$agentic_awk" 'NR == 1 { print $1 } END { if (NR != 1 || NF != 2 || $2 != "agenticmode.tar.gz") exit 1 }' "$checksum_file") || { rm -rf "$temporary"; fail "the release checksum file is malformed"; }
+  [ "${#checksum}" -eq 64 ] || { rm -rf "$temporary"; fail "the release checksum is malformed"; }
+  case "$checksum" in *[!A-Fa-f0-9]*) rm -rf "$temporary"; fail "the release checksum is malformed" ;; esac
+  actual_checksum=$("$agentic_shasum" -a 256 "$archive" | "$agentic_awk" '{ print $1 }') || { rm -rf "$temporary"; fail "could not checksum the release archive"; }
+  [ "$actual_checksum" = "$checksum" ] || { rm -rf "$temporary"; fail "the release archive checksum did not match"; }
+  validate_release_archive "$archive" "$extract_root" "$temporary/archive.list"
+  staged="$extract_root/agenticmode"
+  new_version_output=$("$staged/bin/agenticmode" --version 2>/dev/null) || { rm -rf "$temporary"; fail "the release CLI could not report its version"; }
+  case "$new_version_output" in "agenticmode "*) new_version=${new_version_output#agenticmode } ;; *) rm -rf "$temporary"; fail "the release CLI reported an invalid version" ;; esac
+  if version_is_newer "$new_version" "$AGENTICMODE_VERSION"; then
+    :
+  else
+    case "$?" in
+      1)
+        if [ "$new_version" = "$AGENTICMODE_VERSION" ]; then
+          rm -rf "$temporary"
+          agentic_update_temporary=""
+          trap - EXIT
+          status_ok "agenticmode $AGENTICMODE_VERSION is already the latest stable release."
+          return 0
+        fi
+        rm -rf "$temporary"
+        agentic_update_temporary=""
+        trap - EXIT
+        status_info "Installed agenticmode $AGENTICMODE_VERSION is newer than stable release $new_version; no changes made."
+        return 0
+        ;;
+      *) rm -rf "$temporary"; fail "could not compare installed and release versions" ;;
+    esac
+  fi
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+    /bin/cp -p "$agentic_managed_root/$relative" "$backup/$relative" || { rm -rf "$temporary"; fail "could not back up the current managed install"; }
+  done
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+    destination="$agentic_managed_root/$relative"
+    replacement="${destination}.update.$$"
+    [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || { restore_managed_files "$agentic_managed_root" "$backup"; rm -rf "$temporary"; fail "refusing an existing update staging path: $replacement"; }
+    case "$relative" in config.example) mode=644 ;; *) mode=755 ;; esac
+    if ! /usr/bin/install -m "$mode" "$staged/$relative" "$replacement" || ! /bin/mv -f "$replacement" "$destination"; then
+      rm -f "$replacement"
+      restore_managed_files "$agentic_managed_root" "$backup"
+      rm -rf "$temporary"
+      fail "could not replace the managed install; the previous files were restored"
+    fi
+  done
+  if ! PREFIX="$agentic_managed_prefix" "$agentic_managed_root/install.sh"; then
+    restore_managed_files "$agentic_managed_root" "$backup"
+    rm -rf "$temporary"
+    fail "the updated installer failed; the previous managed files were restored"
+  fi
+  rm -rf "$temporary"
+  agentic_update_temporary=""
+  trap - EXIT
+  status_ok "Updated agenticmode $AGENTICMODE_VERSION -> $new_version."
+}
+
+run_update() {
+  [ "$#" -eq 0 ] || fail "update does not accept arguments"
+  validate_update_state
+  if load_managed_install; then
+    run_managed_update
+  elif find_homebrew_install; then
+    run_homebrew_update
+  else
+    fail "cannot safely update this installation; use git pull for a checkout or reinstall with Homebrew/the direct installer"
+  fi
+}
+
 run_doctor() {
   local state percent source
   validate_host
@@ -2005,6 +2294,11 @@ main() {
   if [ "${1:-}" = "activity" ]; then
     shift
     run_activity_api "$@"
+    exit 0
+  fi
+  if [ "${1:-}" = "update" ]; then
+    shift
+    run_update "$@"
     exit 0
   fi
   find_config_argument "$@"
