@@ -5,7 +5,6 @@ class Agenticmode < Formula
   desc "Keep a Mac awake with its lid closed while agent runs finish"
   homepage "https://github.com/ariakalantari/agenticmode"
   url "https://github.com/ariakalantari/agenticmode/releases/download/v1.3.0/agenticmode.tar.gz"
-  version "1.3.0"
   sha256 "e01971727a2d14819a5c38bd85dc4d73a162075781447a67a03c9171ed1eea08"
   license "MIT"
   head "https://github.com/ariakalantari/agenticmode.git", branch: "main"
