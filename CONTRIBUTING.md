@@ -22,6 +22,8 @@ brew untap agenticmode/local
 
 The stable Homebrew formula uses an immutable source commit and checksum. When releasing a new version, update its URL, version, checksum, and test expectation together.
 
+Release tags must match the version reported by `bin/agenticmode`. Pushing a `vMAJOR.MINOR.PATCH` tag packages the managed direct-install files, publishes the archive and SHA-256 checksum, and generates a GitHub Release. After that succeeds, update the stable Homebrew formula in a focused follow-up pull request using the immutable release source and checksum.
+
 Pull requests require review from the repository owner. Only `@ariakalantari` can merge or otherwise update `main`. Contributors can freely open pull requests from forks or branches, but approval does not grant merge access.
 
 ## Safety expectations

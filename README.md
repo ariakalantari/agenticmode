@@ -31,6 +31,15 @@ The direct installer can be [inspected before it is run](https://raw.githubuserc
 
 Every command is also available through the shorter `am` alias. For example, `am current` is equivalent to `agenticmode current`.
 
+Upgrade through the same channel that installed the CLI:
+
+```bash
+agenticmode update
+# or: am update
+```
+
+Homebrew installs delegate to `brew update` and `brew upgrade`. Installer-managed direct installs download the latest stable release, verify its published SHA-256 checksum and shell syntax, and replace the managed files with rollback protection. Pinned ref installs and source checkouts are left untouched with an actionable error.
+
 See [Installation and upgrades](https://github.com/ariakalantari/agenticmode/wiki/Installation-and-Upgrades) for pinned installs, checkout installs, custom paths, upgrades, and uninstall instructions.
 
 ### 2. Start a safe tracked run

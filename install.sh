@@ -7,6 +7,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source_file="$script_dir/bin/agenticmode"
 helper_source="$script_dir/libexec/agenticmode-watchdog"
 helper_target=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
+remote_marker="$script_dir/.agenticmode-remote-install"
 force=0
 
 case "${1:-}" in
@@ -22,10 +23,38 @@ case "${1:-}" in
     ;;
 esac
 
+select_install_prefix() {
+  local selected
+  if [ -n "${PREFIX:-}" ]; then
+    selected="$PREFIX"
+  elif [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then
+    selected=/opt/homebrew
+  elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    selected=/usr/local
+  else
+    selected="$HOME/.local"
+  fi
+  case "$selected" in
+    /*) ;;
+    *) printf 'install.sh: PREFIX must be an absolute path\n' >&2; return 1 ;;
+  esac
+  case "$selected" in
+    /|"$HOME") printf 'install.sh: refusing unsafe install prefix: %s\n' "$selected" >&2; return 1 ;;
+  esac
+  [ ! -L "$selected" ] || { printf 'install.sh: refusing symlinked install prefix: %s\n' "$selected" >&2; return 1; }
+  printf '%s\n' "$selected"
+}
+
 bootstrap_remote_install() {
   install_ref="${AGENTICMODE_INSTALL_REF:-main}"
   install_root="${AGENTICMODE_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agenticmode}"
   curl_bin="${AGENTICMODE_CURL_BIN:-/usr/bin/curl}"
+  install_prefix=$(select_install_prefix) || exit 1
+  if [ -n "${AGENTICMODE_INSTALL_REF+x}" ]; then
+    install_channel="pinned:$install_ref"
+  else
+    install_channel="stable"
+  fi
 
   case "$install_ref" in
     ''|*..*|*[!A-Za-z0-9._-]*)
@@ -89,7 +118,7 @@ bootstrap_remote_install() {
     }
   done
 
-  printf 'agenticmode-remote-install:%s\n%s\n' "$install_ref" "$install_root" > "$temporary/.agenticmode-remote-install"
+  printf 'agenticmode-remote-install:v2\n%s\n%s\n%s\n' "$install_channel" "$install_root" "$install_prefix" > "$temporary/.agenticmode-remote-install"
   /usr/bin/install -m 755 "$temporary/install.sh" "$install_root/install.sh"
   /usr/bin/install -m 755 "$temporary/uninstall.sh" "$install_root/uninstall.sh"
   /usr/bin/install -m 755 "$temporary/bin/agenticmode" "$install_root/bin/agenticmode"
@@ -117,15 +146,8 @@ if [ ! -f "$helper_source" ]; then
   exit 1
 fi
 
-if [ -n "${PREFIX:-}" ]; then
-  install_dir="$PREFIX/bin"
-elif [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then
-  install_dir=/opt/homebrew/bin
-elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-  install_dir=/usr/local/bin
-else
-  install_dir="$HOME/.local/bin"
-fi
+install_prefix=$(select_install_prefix) || exit 1
+install_dir="$install_prefix/bin"
 
 mkdir -p "$install_dir"
 target="$install_dir/agenticmode"
@@ -143,6 +165,43 @@ for command_target in "$target" "$alias_target"; do
   fi
 done
 
+managed_marker=0
+if [ -e "$remote_marker" ] || [ -L "$remote_marker" ]; then
+  [ -f "$remote_marker" ] && [ ! -L "$remote_marker" ] || {
+    printf 'install.sh: refusing unsafe managed install metadata\n' >&2
+    exit 1
+  }
+  marker_header=$(/usr/bin/sed -n '1p' "$remote_marker" 2>/dev/null || true)
+  case "$marker_header" in
+    agenticmode-remote-install:v2)
+      marker_channel=$(/usr/bin/sed -n '2p' "$remote_marker" 2>/dev/null || true)
+      marker_root=$(/usr/bin/sed -n '3p' "$remote_marker" 2>/dev/null || true)
+      ;;
+    agenticmode-remote-install:*)
+      marker_ref=${marker_header#agenticmode-remote-install:}
+      case "$marker_ref" in main) marker_channel=stable ;; *) marker_channel="pinned:$marker_ref" ;; esac
+      marker_root=$(/usr/bin/sed -n '2p' "$remote_marker" 2>/dev/null || true)
+      ;;
+    *)
+      printf 'install.sh: refusing malformed managed install metadata\n' >&2
+      exit 1
+      ;;
+  esac
+  [ "$marker_root" = "$script_dir" ] || {
+    printf 'install.sh: managed install marker does not match %s\n' "$script_dir" >&2
+    exit 1
+  }
+  case "$marker_channel" in
+    stable) ;;
+    pinned:*)
+      marker_ref=${marker_channel#pinned:}
+      case "$marker_ref" in ''|*..*|*[!A-Za-z0-9._-]*) printf 'install.sh: invalid managed install channel\n' >&2; exit 1 ;; esac
+      ;;
+    *) printf 'install.sh: invalid managed install channel\n' >&2; exit 1 ;;
+  esac
+  managed_marker=1
+fi
+
 chmod 755 "$source_file"
 chmod 755 "$helper_source"
 
@@ -154,6 +213,13 @@ fi
 
 ln -sfn "$source_file" "$target"
 ln -sfn "$source_file" "$alias_target"
+
+if [ "$managed_marker" -eq 1 ]; then
+  marker_temporary="$remote_marker.$$"
+  printf 'agenticmode-remote-install:v2\n%s\n%s\n%s\n' "$marker_channel" "$script_dir" "$install_prefix" > "$marker_temporary"
+  chmod 600 "$marker_temporary"
+  mv "$marker_temporary" "$remote_marker"
+fi
 
 printf 'Installed agenticmode at %s\n' "$target"
 case ":$PATH:" in

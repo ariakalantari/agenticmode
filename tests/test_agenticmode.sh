@@ -187,8 +187,10 @@ clear_codex_fixtures() {
 }
 
 printf 'Test: syntax and version\n'
-/bin/bash -n "$repo_dir/bin/agenticmode" "$repo_dir/libexec/agenticmode-watchdog" "$repo_dir/install.sh" "$repo_dir/uninstall.sh"
-assert_equals "agenticmode 1.2.0" "$("$repo_dir/bin/agenticmode" --version)"
+/bin/bash -n "$repo_dir/bin/agenticmode" "$repo_dir/libexec/agenticmode-watchdog" "$repo_dir/install.sh" "$repo_dir/uninstall.sh" "$repo_dir/scripts/package-release.sh"
+assert_equals "agenticmode 1.3.0" "$("$repo_dir/bin/agenticmode" --version)"
+"$repo_dir/bin/agenticmode" --help > "$test_root/help-command.log"
+assert_contains "agenticmode update" "$test_root/help-command.log"
 
 printf 'Test: signal cleanup restores a normal baseline\n'
 "$repo_dir/bin/agenticmode" > "$test_root/interrupt.log" 2>&1 &
@@ -792,7 +794,7 @@ install_prefix="$test_root/prefix with space"
 PREFIX="$install_prefix" "$repo_dir/install.sh" > "$test_root/install.log" 2>&1
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/agenticmode")"
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/am")"
-assert_equals "agenticmode 1.2.0" "$("$install_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.0" "$("$install_prefix/bin/am" --version)"
 PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1
 rm "$install_prefix/bin/am"
 ln -s /tmp/unrelated-am "$install_prefix/bin/am"
@@ -828,9 +830,177 @@ mkdir -p "$empty_working_dir"
 remote_root_canonical=$(CDPATH= cd -- "$remote_root" && pwd)
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/agenticmode")"
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/am")"
-assert_equals "agenticmode 1.2.0" "$("$remote_prefix/bin/agenticmode" --version)"
-assert_equals "agenticmode 1.2.0" "$("$remote_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/am" --version)"
 [ -f "$remote_root/.agenticmode-remote-install" ] || { printf 'Remote installer marker was not created\n' >&2; exit 1; }
+assert_equals "agenticmode-remote-install:v2
+stable
+$remote_root_canonical
+$remote_prefix" "$(cat "$remote_root/.agenticmode-remote-install")"
+
+printf 'agenticmode-remote-install:main\n%s\n' "$remote_root_canonical" > "$remote_root/.agenticmode-remote-install"
+chmod 600 "$remote_root/.agenticmode-remote-install"
+PREFIX="$remote_prefix" "$remote_root/install.sh" > "$test_root/legacy-marker-migration.log" 2>&1
+assert_equals "agenticmode-remote-install:v2
+stable
+$remote_root_canonical
+$remote_prefix" "$(cat "$remote_root/.agenticmode-remote-install")"
+
+printf 'Test: managed updates verify releases and preserve the current install on failure\n'
+release_source="$test_root/release source"
+release_base="$test_root/releases"
+mkdir -p "$release_source/bin" "$release_source/libexec" "$release_source/scripts" "$release_base/latest/download"
+cp "$repo_dir/install.sh" "$release_source/install.sh"
+cp "$repo_dir/uninstall.sh" "$release_source/uninstall.sh"
+cp "$repo_dir/config.example" "$release_source/config.example"
+cp "$repo_dir/bin/agenticmode" "$release_source/bin/agenticmode"
+cp "$repo_dir/libexec/agenticmode-watchdog" "$release_source/libexec/agenticmode-watchdog"
+cp "$repo_dir/scripts/package-release.sh" "$release_source/scripts/package-release.sh"
+sed 's/readonly AGENTICMODE_VERSION="1.3.0"/readonly AGENTICMODE_VERSION="1.3.1"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode" "$release_source/scripts/package-release.sh"
+"$release_source/scripts/package-release.sh" v1.3.1 "$release_base/latest/download" > "$test_root/package-release.log"
+
+"$repo_dir/bin/agenticmode" > "$test_root/update-active-controller.log" 2>&1 &
+controller_pid=$!
+wait_for_value 1 "$pmset_state"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-active.log" 2>&1; then
+  printf 'Update unexpectedly ran while agentic mode was active\n' >&2
+  exit 1
+fi
+assert_contains "agentic mode is active" "$test_root/update-active.log"
+"$repo_dir/bin/agenticmode" off > "$test_root/update-active-off.log" 2>&1
+wait_for_exit "$controller_pid"
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+
+corrupt_release_base="$test_root/corrupt-releases"
+mkdir -p "$corrupt_release_base/latest/download"
+cp "$release_base/latest/download/agenticmode.tar.gz" "$corrupt_release_base/latest/download/agenticmode.tar.gz"
+cp "$release_base/latest/download/agenticmode.tar.gz.sha256" "$corrupt_release_base/latest/download/agenticmode.tar.gz.sha256"
+printf 'tampered\n' >> "$corrupt_release_base/latest/download/agenticmode.tar.gz"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$corrupt_release_base" "$remote_prefix/bin/am" update > "$test_root/update-corrupt.log" 2>&1; then
+  printf 'Update unexpectedly accepted a corrupt release archive\n' >&2
+  exit 1
+fi
+assert_contains "checksum did not match" "$test_root/update-corrupt.log"
+assert_equals "agenticmode 1.3.0" "$("$remote_prefix/bin/agenticmode" --version)"
+
+AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-success.log" 2>&1
+assert_contains "Updated agenticmode 1.3.0 -> 1.3.1" "$test_root/update-success.log"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/am" --version)"
+AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/agenticmode" update > "$test_root/update-current.log" 2>&1
+assert_contains "already the latest stable release" "$test_root/update-current.log"
+
+rollback_release_base="$test_root/rollback-releases"
+mkdir -p "$rollback_release_base/latest/download"
+sed 's/readonly AGENTICMODE_VERSION="1.3.1"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode"
+printf '\n[ "${AGENTICMODE_TESTING:-0}" != "1" ] || exit 42\n' >> "$release_source/install.sh"
+"$release_source/scripts/package-release.sh" v1.3.2 "$rollback_release_base/latest/download" > "$test_root/package-rollback-release.log"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-rollback.log" 2>&1; then
+  printf 'Update unexpectedly succeeded when the staged installer failed\n' >&2
+  exit 1
+fi
+assert_contains "previous managed files were restored" "$test_root/update-rollback.log"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+
+incomplete_rollback_release_base="$test_root/incomplete-rollback-releases"
+mkdir -p "$incomplete_rollback_release_base/latest/download"
+cp "$repo_dir/install.sh" "$release_source/install.sh"
+sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode"
+printf '\nif [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then chmod 500 "$script_dir/bin"; exit 42; fi\n' >> "$release_source/install.sh"
+"$release_source/scripts/package-release.sh" v1.3.3 "$incomplete_rollback_release_base/latest/download" > "$test_root/package-incomplete-rollback-release.log"
+cp "$remote_root/bin/agenticmode" "$test_root/agenticmode-before-incomplete-rollback"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$incomplete_rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-incomplete-rollback.log" 2>&1; then
+  printf 'Update unexpectedly succeeded when rollback was incomplete\n' >&2
+  exit 1
+fi
+assert_contains "rollback was incomplete; reinstall agenticmode before running it again" "$test_root/update-incomplete-rollback.log"
+chmod 755 "$remote_root/bin"
+/usr/bin/install -m 755 "$test_root/agenticmode-before-incomplete-rollback" "$remote_root/bin/agenticmode"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+  "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
+mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
+chmod 755 "$release_source/bin/agenticmode"
+
+syntax_release_base="$test_root/syntax-releases"
+mkdir -p "$syntax_release_base/latest/download"
+cp "$repo_dir/install.sh" "$release_source/install.sh"
+printf '\ninvalid (\n' >> "$release_source/install.sh"
+"$release_source/scripts/package-release.sh" v1.3.2 "$syntax_release_base/latest/download" > "$test_root/package-syntax-release.log"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$syntax_release_base" "$remote_prefix/bin/am" update > "$test_root/update-syntax.log" 2>&1; then
+  printf 'Update unexpectedly accepted a release with invalid shell syntax\n' >&2
+  exit 1
+fi
+assert_contains "failed shell syntax validation" "$test_root/update-syntax.log"
+assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+
+cp "$remote_root/.agenticmode-remote-install" "$test_root/managed-marker"
+printf 'agenticmode-remote-install:v2\npinned:v1.3.1\n%s\n%s\n' "$remote_root_canonical" "$remote_prefix" > "$remote_root/.agenticmode-remote-install"
+chmod 600 "$remote_root/.agenticmode-remote-install"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-pinned.log" 2>&1; then
+  printf 'Update unexpectedly changed a pinned direct install\n' >&2
+  exit 1
+fi
+assert_contains "pinned to v1.3.1" "$test_root/update-pinned.log"
+mv "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
+
+chmod 666 "$remote_root/.agenticmode-remote-install"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-marker-mode.log" 2>&1; then
+  printf 'Update unexpectedly trusted writable managed metadata\n' >&2
+  exit 1
+fi
+assert_contains "must not be group- or world-writable" "$test_root/update-marker-mode.log"
+chmod 600 "$remote_root/.agenticmode-remote-install"
+mv "$remote_root/.agenticmode-remote-install" "$test_root/managed-marker"
+ln -s "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
+if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-marker-link.log" 2>&1; then
+  printf 'Update unexpectedly trusted symlinked managed metadata\n' >&2
+  exit 1
+fi
+assert_contains "not a regular file" "$test_root/update-marker-link.log"
+rm "$remote_root/.agenticmode-remote-install"
+mv "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
+
+printf 'Test: Homebrew-owned updates delegate exact operations to brew\n'
+brew_log="$test_root/brew.log"
+cat > "$mock_bin/brew" <<'MOCK'
+#!/bin/bash
+printf '%s\n' "$*" >> "$AGENTICMODE_TEST_BREW_LOG"
+case "${1:-}" in
+  --prefix) printf '%s\n' "$AGENTICMODE_TEST_BREW_PREFIX" ;;
+  update) ;;
+  upgrade) ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod 755 "$mock_bin/brew"
+mv "$remote_root/.agenticmode-remote-install" "$test_root/managed-marker"
+AGENTICMODE_TEST_BREW_LOG="$brew_log" \
+  AGENTICMODE_TEST_BREW_PREFIX="$remote_root_canonical" \
+  AGENTICMODE_BREW_BIN="$mock_bin/brew" \
+  "$remote_prefix/bin/am" update > "$test_root/update-brew.log" 2>&1
+assert_occurrences 2 "--prefix ariakalantari/agenticmode/agenticmode" "$brew_log"
+assert_contains "update" "$brew_log"
+assert_contains "upgrade --formula ariakalantari/agenticmode/agenticmode" "$brew_log"
+mv "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
+
+if "$repo_dir/bin/agenticmode" update > "$test_root/update-checkout.log" 2>&1; then
+  printf 'Update unexpectedly changed a source checkout\n' >&2
+  exit 1
+fi
+assert_contains "cannot safely update this installation" "$test_root/update-checkout.log"
+
 PREFIX="$remote_prefix" "$remote_root/uninstall.sh" > "$test_root/remote-uninstall.log" 2>&1
 [ ! -e "$remote_prefix/bin/agenticmode" ] || { printf 'Remote uninstaller left the command symlink behind\n' >&2; exit 1; }
 [ ! -e "$remote_prefix/bin/am" ] || { printf 'Remote uninstaller left the am symlink behind\n' >&2; exit 1; }
