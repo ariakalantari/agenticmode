@@ -91,9 +91,9 @@ For interactive agents, prefer `run --` when possible. Long-lived TUI processes 
 
 ## Terminal status
 
-Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a centered status panel, elapsed time, tracked-run progress, and an animated laptop. The layout redraws itself after a terminal resize and progressively simplifies in small windows. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
+Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a left-aligned status panel, elapsed time, tracked-run progress, Codex session titles, and an animated laptop. Every status occupies one physical line: long content ends in `...`, and resizing the terminal immediately redraws the view to reveal or trim content. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
 
-Use `--no-ui` for compact line output, or set `AGENTICMODE_UI=plain` to make that the default. Pipes, redirected output, `TERM=dumb`, and `agenticmode run -- command` always use line output so logs and wrapped-command output remain intact. Interactive line output is capped to a readable measure and wraps with a hanging indent instead of relying on accidental terminal wrapping.
+Use `--no-ui` for compact line output, or set `AGENTICMODE_UI=plain` to make that the default. Pipes, redirected output, `TERM=dumb`, and `agenticmode run -- command` always use line output so logs and wrapped-command output remain intact. Interactive line output is capped to a readable measure and truncates with `...` instead of wrapping into misaligned continuation rows.
 
 The text label always carries the meaning; color is an optional secondary cue that is enabled only in a terminal. `NO_COLOR` disables color, while `FORCE_COLOR=1` enables it explicitly.
 
@@ -106,7 +106,7 @@ The text label always carries the meaning; color is an optional secondary cue th
 | `OK` | A health check passed or tracking completed safely |
 | `FAILED` | A wrapped command returned a nonzero status |
 
-`current` shows session titles by default and prints only state changes as work finishes. Exact turn IDs, PIDs, and lifecycle details remain available through `agenticmode status --verbose`.
+`current` reads the same Codex session descriptions shown by the desktop app and never substitutes raw user prompts. A user-set session name takes precedence; when neither title source is available, it shows the neutral `Codex session` fallback. Exact turn IDs, PIDs, and lifecycle details remain available through `agenticmode status --verbose`.
 
 For automation, `agenticmode status --machine` emits uncolored `key=value` lines. An active controller reports `sleep_disabled`, `controller`, `mode`, `controller_pid`, `started`, `restore_baseline`, `watchdog`, and, when available, `watchdog_pid`, `deadline_epoch`, and `tracked_runs_remaining`. An inactive controller reports only `sleep_disabled` and `controller`. The command exits `0` for a healthy active controller or a safely inactive system, and `2` for an inconsistent or unhealthy state. `--machine` and `--verbose` are mutually exclusive.
 
