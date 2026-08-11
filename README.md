@@ -5,7 +5,7 @@
 
 Keep a Mac laptop awake with its lid closed until your agent work is done.
 
-`agenticmode` is a dependency-free macOS command-line tool. It can follow exact Codex turns, published OpenCode activity, supported one-shot agent processes, a command you launch, or PIDs you already know. A small root-owned watchdog restores the previous sleep setting when the controller exits—even if that controller is killed.
+`agenticmode` is a dependency-free macOS command-line tool, also available through the shorter `am` command. It can follow exact Codex turns, published OpenCode activity, supported one-shot agent processes, a command you launch, or PIDs you already know. A small root-owned watchdog restores the previous sleep setting when the controller exits—even if that controller is killed.
 
 > [!CAUTION]
 > Agentic mode disables system sleep, not just lid-close sleep. Keep the Mac on a hard, ventilated surface, never place it in a bag while active, and use a timeout or battery cutoff for unattended work.
@@ -27,44 +27,52 @@ Or install directly without a package manager:
 curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh | /bin/bash
 ```
 
-The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Homebrew asks for an administrator password on the first awake-mode run; the direct installer asks once during installation. This installs a minimal safety watchdog in `/Library/PrivilegedHelperTools`.
+The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Both methods provide `agenticmode` and `am`. The direct installer asks for an administrator password during installation to place the minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`; Homebrew does this on the first awake-mode run.
 
-Every command is also available through the shorter `am` alias. For example, `am current` is equivalent to `agenticmode current`.
-
-Upgrade through the same channel that installed the CLI:
-
-```bash
-agenticmode update
-# or: am update
-```
-
-Homebrew installs delegate to `brew update` and `brew upgrade`. Installer-managed direct installs download the latest stable release, verify its published SHA-256 checksum and shell syntax, and replace the managed files with rollback protection. Pinned ref installs and source checkouts are left untouched with an actionable error.
+Every command works with either name. For example, `am current` is equivalent to `agenticmode current`.
 
 See [Installation and upgrades](https://github.com/ariakalantari/agenticmode/wiki/Installation-and-Upgrades) for pinned installs, checkout installs, custom paths, upgrades, and uninstall instructions.
 
-### 2. Start a safe tracked run
+### 2. Update
+
+Update through the same channel that installed the CLI:
+
+```bash
+am update
+```
+
+| Installation | What `am update` does |
+| --- | --- |
+| Homebrew | Refreshes Homebrew, then upgrades only the agenticmode formula |
+| Managed direct install | Downloads the latest stable release, verifies its SHA-256 checksum, archive paths, and shell syntax, then installs with rollback protection |
+| Pinned ref | Leaves the pinned version unchanged and explains how to return to stable releases |
+| Source checkout | Leaves the checkout unchanged and directs you to update it with Git |
+
+Updates are refused while an awake controller, watchdog, or sleep override is active. Run `am off` first. Direct installs created before v1.3.0 need the direct installer run once more to add `am update` and migrate their installation metadata.
+
+### 3. Start a safe tracked run
 
 Wrapping a new command gives the clearest lifetime boundary:
 
 ```bash
-agenticmode run -- codex exec "finish the test suite"
+am run -- codex exec "finish the test suite"
 ```
 
 Or snapshot work that is already active and add unattended safety limits:
 
 ```bash
-agenticmode current --timeout 8h --min-battery 20
+am current --timeout 8h --min-battery 20
 ```
 
 `current` waits only for the runs found at startup. Work started later does not extend the awake lease.
 
-### 3. Check or stop it
+### 4. Check or stop it
 
 From another terminal:
 
 ```bash
-agenticmode status --verbose
-agenticmode off
+am status --verbose
+am off
 ```
 
 Normal completion restores the sleep setting that existed before agenticmode started. `agenticmode off` is the explicit recovery command: it stops any active controller or orphaned watchdog and sets `SleepDisabled` to `0`.
@@ -101,20 +109,23 @@ For automation, `agenticmode status --machine` emits uncolored `key=value` lines
 ## Common commands
 
 ```bash
-# Keep awake until Ctrl+C or `agenticmode off`
-agenticmode --timeout 8h --min-battery 20
+# Keep awake until Ctrl+C or `am off`
+am --timeout 8h --min-battery 20
 
 # Show what `current` can see without changing power settings
-agenticmode detect
+am detect
 
 # Diagnose installation, permissions, and runtime state
-agenticmode doctor
+am doctor
 
 # Show the effective configuration
-agenticmode config
+am config
+
+# Update through the owning installation channel
+am update
 
 # Restore normal lid-close sleep
-agenticmode off
+am off
 ```
 
 Timeouts accept `s`, `m`, `h`, or `d`, up to 365 days. A timeout or battery cutoff ends only the awake lease; it never kills a tracked agent or wrapped command.
@@ -152,7 +163,8 @@ Read [Safety and reliability](https://github.com/ariakalantari/agenticmode/wiki/
 Command reference is always available locally:
 
 ```bash
-agenticmode --help
+am --help
+# or: agenticmode --help
 ```
 
 ## Contributing and support
