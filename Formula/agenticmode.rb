@@ -30,6 +30,6 @@ class Agenticmode < Formula
 
   test do
     assert_equal "agenticmode 1.1.0", shell_output("#{bin}/agenticmode --version").strip
-    assert_match(/agenticmode \[command\] \[options\]/, shell_output("#{bin}/agenticmode --help"))
+    assert_match(/^  agenticmode \[options\]$/, shell_output("#{bin}/agenticmode --help"))
   end
 end
