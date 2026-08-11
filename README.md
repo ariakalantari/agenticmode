@@ -1,126 +1,266 @@
 # agenticmode
 
-`agenticmode` is a small macOS command line tool for keeping a Mac laptop running while its lid is closed. It uses macOS power management directly and does not require a third-party app.
+`agenticmode` is a dependency-free macOS command line tool that keeps a Mac laptop running with its lid closed while development agents work. It uses the macOS power setting that covers lid-close sleep, adds a privileged safety watchdog, and never directly signals or modifies a tracked agent run.
 
 ## Install
 
-Clone the repository into Documents and run the installer:
-
 ```bash
 git clone https://github.com/ariakalantari/agenticmode.git ~/Documents/agenticmode
-cd ~/Documents/agenticmode
-./install.sh
+~/Documents/agenticmode/install.sh
 ```
 
-The installer creates a symlink named `agenticmode` in a writable directory already on `PATH` when possible. On Apple silicon Macs with Homebrew, this is normally `/opt/homebrew/bin`.
+The installer adds one symlink named `agenticmode` to a writable directory already on `PATH`. It also installs a minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`, so macOS asks for an administrator password once during installation. An older symlink-only installation will install this helper on the next active run. On an Apple silicon Mac with Homebrew, the command symlink is normally `/opt/homebrew/bin`.
 
-To install somewhere specific:
+Use a specific prefix if needed:
 
 ```bash
-PREFIX="$HOME/.local" ./install.sh
+PREFIX="$HOME/.local" ~/Documents/agenticmode/install.sh
 ```
 
-## Use
+The installer is idempotent and refuses to replace another file or unrelated symlink. `./install.sh --force` can replace an unrelated symlink when that is intentional.
 
-Keep the Mac awake indefinitely:
+## Quick start
+
+Keep the Mac awake until you stop the foreground controller:
 
 ```bash
 agenticmode
 ```
 
-The command stays in the foreground. Closing the lid does not stop it. Press Ctrl+C when you are done, or run `agenticmode off` from another terminal. Normal sleep is restored before the foreground process exits.
+Press Ctrl+C, or use `agenticmode off` in another terminal. The Mac stays awake even after agent runs finish.
 
-Keep the Mac awake only for agent runs that are active when the command starts:
+Snapshot the runs active right now and restore the previous setting when those exact runs finish:
 
 ```bash
 agenticmode current
 ```
 
-This takes a snapshot. Runs started later are not included. When every snapshotted run has completed or been interrupted, normal sleep is restored automatically.
+Wrap one command for exact lifetime tracking:
 
-Turn the mode off from another terminal:
+```bash
+agenticmode run -- codex exec "finish the test suite"
+```
+
+Wait for one or more existing process IDs:
+
+```bash
+agenticmode wait 1234 5678
+```
+
+Inspect behavior without changing power settings:
+
+```bash
+agenticmode detect
+agenticmode status --verbose
+agenticmode doctor
+```
+
+Restore normal lid-close sleep from any terminal:
 
 ```bash
 agenticmode off
 ```
 
-Check the current state:
+`off` intentionally sets `SleepDisabled` to `0`. Normal automatic cleanup restores the setting that existed before agenticmode started.
+
+Only one awake controller can own the Mac at a time. Starting another mode while one is active fails without changing state or running a wrapped command. Use `status`, wait for the current mode, or run `off` first.
+
+## Useful safety limits
+
+Stop after a maximum duration:
+
+```bash
+agenticmode --timeout 8h
+agenticmode current --timeout 90m
+```
+
+Stop when the battery reaches a threshold while running on battery:
+
+```bash
+agenticmode --min-battery 25
+```
+
+Combine both limits:
+
+```bash
+agenticmode current --timeout 12h --min-battery 20
+```
+
+Durations accept `s`, `m`, `h`, or `d`, up to 365 days. A value of `0` disables the limit.
+
+A timeout or battery cutoff ends only the awake lease. It never kills a tracked or wrapped command. If work is still running, agenticmode returns exit status `75` and prints the child PID when one is known. This prevents `agenticmode run -- tests && deploy` from starting deployment after an incomplete test run.
+
+## Choosing the right tracking mode
+
+| Need | Command | Tracking confidence |
+| --- | --- | --- |
+| Stay awake until manually stopped | `agenticmode` | Exact controller lifetime |
+| Finish Codex turns active at startup | `agenticmode current` | Exact observed turn lifecycle |
+| Run a new agent command | `agenticmode run -- command` | Exact top-level child PID lifetime unless manually stopped or cut off |
+| Wait for a known existing command | `agenticmode wait PID` | Exact supplied PID and process start time |
+| Include interactive agent sessions | `agenticmode current --process-policy session` | Conservative process lifetime |
+
+For interactive agents, `run --` is the most reliable option. A long-lived interactive CLI remains open between prompts, so its process lifetime is not the same as a single agent run.
+
+`run --` and `wait PID` follow only the selected top-level PID, not its complete descendant process tree. If that process daemonizes or exits after launching background work, the awake lease can end while descendants continue. Wrap a command that remains alive for the whole job, or wait on the long-lived worker PID instead. Also note that terminal-generated Ctrl+C and Ctrl+Z can reach a wrapped foreground command through the terminal process group even though agenticmode never sends those signals to tracked PIDs itself.
+
+## How `current` detects runs
+
+macOS does not expose a universal concept of an agent run. `agenticmode current` therefore takes a read-only snapshot using two conservative detectors.
+
+### Codex turns
+
+Codex desktop, CLI, and subagent turns are identified from lifecycle records under `$CODEX_HOME/sessions`, or `~/.codex/sessions` by default. Lifecycle events are replayed globally by turn ID, which handles multiple active turns in one file and deduplicates parent history copied into subagent files.
+
+When agenticmode is launched from inside a Codex task, that task and its known ancestors are excluded. This prevents `current` from waiting for the task that invoked it. The ancestor lookup uses Codex's local state database when it is available.
+
+The snapshot records exact turn IDs. Runs started later do not extend the wait. A tracked turn ends on `task_complete` or `turn_aborted`. Global lifecycle replay happens once while building the snapshot. Ongoing polling follows the selected canonical rollout and reads only bytes appended after the snapshot, which avoids rescanning large histories. Agenticmode only reads these files and never contacts, cancels, or edits Codex.
+
+The JSONL lifecycle format is an internal Codex detail, not a promised stable API. `agenticmode detect` shows what the current version can see. If a Codex update changes the format, use `agenticmode run -- ...` or `agenticmode wait PID` until the detector is updated.
+
+### Other agent CLIs
+
+The default `oneshot` process policy includes only command shapes that normally represent one run. It recognizes native executables and conservative shell, Node.js, Python module, npx, bunx, and uvx wrapper layouts:
+
+- Claude Code with `-p` or `--print`
+- Gemini CLI with `-p` or `--prompt`
+- Aider with `-m` or `--message`
+- OpenCode with `run`
+
+Codex processes are not added as generic process targets because Codex desktop and interactive CLI processes can remain alive after a turn finishes.
+
+Use `--process-policy session` to wait for the full lifetime of recognized interactive sessions. Use `--process NAME` for another executable name, or put persistent custom names in `custom_process_names`. Explicit custom process names are treated as session processes, so they may remain active while waiting for input.
+
+Process targets store both PID and process start time, are limited to the current macOS user, and are monitored without sending signals.
+
+## Configuration
+
+The default config path is:
+
+```text
+~/.config/agenticmode/config
+```
+
+Start from [`config.example`](config.example):
+
+```bash
+mkdir -p ~/.config/agenticmode
+cp ~/Documents/agenticmode/config.example ~/.config/agenticmode/config
+chmod 600 ~/.config/agenticmode/config
+```
+
+Supported keys:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `poll_seconds` | `5` | Check interval from 1 to 300 seconds |
+| `timeout` | `0` | Maximum duration, with `0` meaning unlimited |
+| `min_battery` | `0` | Stop percentage on battery, with `0` disabled |
+| `include_codex` | `1` | Enable Codex lifecycle detection |
+| `include_processes` | `1` | Enable known process detection |
+| `process_policy` | `oneshot` | Use `oneshot` or `session` matching |
+| `process_names` | built-in list | Comma-separated executable names |
+| `custom_process_names` | empty | Extra executable names tracked for their full session lifetime |
+| `codex_stale_seconds` | `0` | Ignore active Codex files older than this, with `0` disabled |
+| `codex_home` | automatic | Override the Codex data directory |
+
+Precedence is command line flags, `AGENTICMODE_*` environment variables, the config file, then defaults. Config files use strict `key=value` lines, are never executed, reject unknown keys, reject symlinks, and must not be group- or world-writable.
+
+Keep `codex_stale_seconds=0` unless you explicitly prefer an age cutoff. A nonzero value can exclude a legitimate quiet, long-running Codex turn and allow sleep before it finishes.
+
+Show the effective configuration:
+
+```bash
+agenticmode config
+agenticmode config --config /path/to/config
+```
+
+## Reliability and cleanup
+
+Starting a mode authenticates once with `sudo`, then launches the minimal root-owned watchdog installed by `install.sh`. The main command remains unprivileged. The watchdog owns the `pmset` change, verifies that it took effect, reasserts it at least every two seconds, and retries and verifies restoration when the controller exits.
+
+This avoids relying on a cached `sudo` credential hours later. It also restores the prior setting if the unprivileged controller is killed with `SIGKILL`. Controller state is stored in `~/Library/Caches/agenticmode` with owner-only permissions and PID start-time checks to prevent stale PID reuse.
+
+Normal cleanup covers Ctrl+C, SIGTERM, SIGHUP, timeouts, battery cutoff, tracked-run completion, and ordinary command completion. `agenticmode off` asks an active controller to clean up, waits for any orphaned watchdog, then explicitly restores normal sleep. Start and stop state changes use a kernel-backed macOS lock, and each watchdog has a unique persistent stop lease. A concurrent `off`, delayed helper, or immediate restart therefore cannot overtake a controller that is still starting.
+
+Ctrl+Z is not a pause mechanism for agenticmode. It ends the awake lease and restores the prior setting. A command wrapped by `run --` may remain stopped by the terminal signal.
+
+A direct `SIGKILL` of the privileged watchdog, kernel failure, or abrupt power loss cannot run cleanup. After any abnormal event, check:
 
 ```bash
 agenticmode status
+agenticmode off
 ```
 
-All commands are idempotent. Starting a second controller reports the existing controller instead of changing ownership. Running `off` when normal sleep is already enabled is safe.
+The macOS power setting is global, while controller state is per user. Concurrent agenticmode controllers from different logged-in user accounts are not supported.
 
-## How current-run detection works
+## macOS behavior and safety
 
-There is no universal macOS concept of an "agent run," and desktop Codex tasks do not each have their own operating-system process. The Codex desktop app uses one long-lived app-server process for many tasks, so waiting for every process named `codex` would never finish.
-
-`agenticmode current` uses two read-only strategies:
-
-1. Codex desktop, CLI, and subagent turns are detected from JSONL lifecycle events under `$CODEX_HOME/sessions`, or `~/.codex/sessions` when `CODEX_HOME` is unset. A turn is active when its latest lifecycle event is `task_started`. The tool snapshots the exact turn ID, then waits for `task_complete` or `turn_aborted` for that same ID. It does not edit the logs, connect to the app-server, cancel work, or start new work.
-2. Standalone agent CLIs are detected by process name and command line. The built-in list covers Codex, Claude Code, Gemini CLI, Aider, and OpenCode. The tool records both PID and process start time to protect against PID reuse. It only waits and never signals these processes.
-
-The Codex lifecycle strategy is based on the same thread and turn model documented by the [Codex app-server reference](https://github.com/openai/codex/tree/main/codex-rs/app-server). It is stronger than process-name guessing for the Codex desktop app, but the on-disk JSONL format is not a promised stable public interface. If a future Codex release changes those lifecycle records, Codex desktop detection may miss a run. Process matching for other agents is intentionally conservative and may miss a wrapper with an unusual executable name.
-
-If a tracked Codex process crashes without writing a completion or abort event, `current` may continue waiting. Use Ctrl+C or `agenticmode off` to restore normal sleep immediately.
-
-## Why this uses pmset instead of caffeinate
-
-The tool runs:
+The tool applies:
 
 ```bash
 sudo pmset -a disablesleep 1
 ```
 
-and restores normal behavior with:
+Apple documents this setting as disabling all sleep functions. An ordinary idle-sleep assertion, including `caffeinate -i`, can still allow lid-close sleep, so it does not solve this specific case.
 
-```bash
-sudo pmset -a disablesleep 0
-```
+This setting disables system sleep, not only lid-close sleep. The display can still turn off.
 
-Apple documents `disablesleep 1` as disabling all sleep functions. Apple's power assertion documentation also says an idle-sleep assertion can still allow sleep for lid close, low battery, the Apple menu, and other non-idle reasons. That is why `caffeinate -i` alone is not sufficient for this use case.
+- Keep the Mac on a hard, ventilated surface.
+- Never put it in a bag while agenticmode is active.
+- Prefer external power for long closed-lid work.
+- Use `--timeout` and `--min-battery` for unattended runs.
+- macOS may still force shutdown or sleep for thermal or battery protection.
+
+Apple's supported closed-display setup uses external power plus an external display, keyboard, and mouse. Running headless with `disablesleep` is a command-line power-management override, not the standard clamshell setup.
 
 Sources:
 
 - [Apple Support: prevent sleep with pmset](https://support.apple.com/ja-jp/101114)
 - [Apple Developer: idle-sleep assertions still allow lid-close sleep](https://developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridlesystemsleep)
-- [Apple Support: Apple's supported closed-display setup requires power and external input devices](https://support.apple.com/en-nz/102501)
-- The local `pmset(1)` and `caffeinate(8)` manual pages installed with macOS
+- [Apple Support: closed-display requirements](https://support.apple.com/en-nz/102501)
+- The local `pmset(1)` and `caffeinate(8)` manual pages included with macOS
 
-`disablesleep` is accepted by current macOS and is documented in the Apple Support article above, but it is not listed among the settings in the current local `pmset(1)` manual. This project treats that mismatch as an implementation caveat and verifies the resulting `SleepDisabled` value after every change.
+`disablesleep` is accepted by current macOS and documented in the Apple Support article, but it is absent from the settings list in the current local `pmset(1)` manual. Agenticmode verifies the reported `SleepDisabled` value after every change.
 
-## Safety
+## Troubleshooting
 
-This setting disables all system sleep, not only lid-close sleep. The display can still turn off.
+If `current` finds nothing:
 
-- Keep the Mac on a hard, ventilated surface.
-- Do not put it in a bag while the mode is active.
-- Prefer power from a charger or display. Running closed on battery can drain the battery and create heat.
-- macOS can still force sleep or shutdown for low battery, thermal protection, or other safety reasons.
-- Always use `agenticmode off` if a controller was force-killed or the terminal crashed. SIGKILL and sudden power loss cannot run shell cleanup traps.
+```bash
+agenticmode detect
+agenticmode doctor
+```
 
-The command verifies `SleepDisabled` after enabling and disabling it. Ctrl+C, SIGTERM, SIGHUP, normal completion, and handled failures all run the same cleanup path.
+If it waits longer than expected:
 
-## Development
+```bash
+agenticmode status --verbose
+agenticmode off
+```
 
-Run the tests without changing the real Mac power state:
+Common causes are a long-lived interactive session selected with `process_policy=session`, an active Codex turn without a terminal lifecycle event, or an unsupported wrapper command. Prefer `agenticmode run -- command` for unusual tools and wrappers.
+
+## Development and contributions
+
+Run the full suite without touching real power settings:
 
 ```bash
 ./tests/test_agenticmode.sh
 ```
 
-The tests replace `pmset` and `sudo` with local fakes and use temporary Codex session fixtures.
+The suite replaces `pmset` and `sudo` with local fakes. It covers signal cleanup, `SIGKILL` recovery, immediate orphan shutdown and restart, delayed watchdog registration, atomic state locking, restoration retries and failures, baseline preservation, watchdog reassertion, long-poll interruption, controller conflicts, Codex deduplication, appended-only polling, caller exclusion, native and wrapped process detection, exact command and PID modes, cutoff exit statuses, battery query failures, config safety, installer ownership checks, and idempotent shutdown.
+
+Forks and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Changes to `main` require the repository owner's review, and only `@ariakalantari` can merge.
 
 ## Uninstall
 
-First restore normal sleep, then remove the symlink:
-
 ```bash
-agenticmode off
 cd ~/Documents/agenticmode
 ./uninstall.sh
 ```
+
+The uninstaller turns off an active override before removing this checkout's symlink. For a custom install prefix, run `PREFIX=/path ./uninstall.sh`.
 
 ## License
 

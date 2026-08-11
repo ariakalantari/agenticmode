@@ -1,0 +1,13 @@
+# Copy this file to ~/.config/agenticmode/config and edit as needed.
+# Command line flags override environment variables, which override this file.
+
+poll_seconds=5
+timeout=0
+min_battery=0
+include_codex=1
+include_processes=1
+process_policy=oneshot
+process_names=codex,claude,gemini,aider,opencode
+custom_process_names=
+codex_stale_seconds=0
+# codex_home=/Users/your-name/.codex
