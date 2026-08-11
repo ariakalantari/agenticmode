@@ -2,6 +2,7 @@
 
 set -eu
 
+repository="ariakalantari/agenticmode"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source_file="$script_dir/bin/agenticmode"
 helper_source="$script_dir/libexec/agenticmode-watchdog"
@@ -20,6 +21,92 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+
+bootstrap_remote_install() {
+  install_ref="${AGENTICMODE_INSTALL_REF:-main}"
+  install_root="${AGENTICMODE_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agenticmode}"
+  curl_bin="${AGENTICMODE_CURL_BIN:-/usr/bin/curl}"
+
+  case "$install_ref" in
+    ''|*..*|*[!A-Za-z0-9._-]*)
+      printf 'install.sh: invalid AGENTICMODE_INSTALL_REF: %s\n' "$install_ref" >&2
+      exit 1
+      ;;
+  esac
+  case "$install_root" in
+    /*) ;;
+    *)
+      printf 'install.sh: AGENTICMODE_INSTALL_DIR must be an absolute path\n' >&2
+      exit 1
+      ;;
+  esac
+  case "$install_root" in
+    /|"$HOME")
+      printf 'install.sh: refusing unsafe AGENTICMODE_INSTALL_DIR: %s\n' "$install_root" >&2
+      exit 1
+      ;;
+  esac
+  [ ! -L "$install_root" ] || {
+    printf 'install.sh: refusing symlinked install directory: %s\n' "$install_root" >&2
+    exit 1
+  }
+  [ -x "$curl_bin" ] || {
+    printf 'install.sh: curl was not found at %s\n' "$curl_bin" >&2
+    exit 1
+  }
+
+  download_base="${AGENTICMODE_INSTALL_BASE_URL:-https://raw.githubusercontent.com/$repository/$install_ref}"
+  download_base=${download_base%/}
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/agenticmode-install.XXXXXX") || exit 1
+  trap 'rm -rf "$temporary"' EXIT INT TERM HUP
+  mkdir -p "$temporary/bin" "$temporary/libexec"
+
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+    "$curl_bin" -fsSL "$download_base/$relative" -o "$temporary/$relative" || {
+      printf 'install.sh: could not download %s from %s\n' "$relative" "$download_base" >&2
+      exit 1
+    }
+  done
+
+  /bin/bash -n "$temporary/install.sh" "$temporary/uninstall.sh" \
+    "$temporary/bin/agenticmode" "$temporary/libexec/agenticmode-watchdog" || {
+    printf 'install.sh: downloaded files failed shell syntax validation\n' >&2
+    exit 1
+  }
+
+  for directory in "$install_root/bin" "$install_root/libexec"; do
+    [ ! -L "$directory" ] || {
+      printf 'install.sh: refusing symlinked install directory: %s\n' "$directory" >&2
+      exit 1
+    }
+  done
+  mkdir -p "$install_root/bin" "$install_root/libexec"
+  install_root=$(CDPATH= cd -- "$install_root" && pwd)
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog .agenticmode-remote-install; do
+    [ ! -L "$install_root/$relative" ] || {
+      printf 'install.sh: refusing to replace symlink: %s\n' "$install_root/$relative" >&2
+      exit 1
+    }
+  done
+
+  printf 'agenticmode-remote-install:%s\n%s\n' "$install_ref" "$install_root" > "$temporary/.agenticmode-remote-install"
+  /usr/bin/install -m 755 "$temporary/install.sh" "$install_root/install.sh"
+  /usr/bin/install -m 755 "$temporary/uninstall.sh" "$install_root/uninstall.sh"
+  /usr/bin/install -m 755 "$temporary/bin/agenticmode" "$install_root/bin/agenticmode"
+  /usr/bin/install -m 755 "$temporary/libexec/agenticmode-watchdog" "$install_root/libexec/agenticmode-watchdog"
+  /usr/bin/install -m 644 "$temporary/config.example" "$install_root/config.example"
+  /usr/bin/install -m 600 "$temporary/.agenticmode-remote-install" "$install_root/.agenticmode-remote-install"
+
+  trap - EXIT INT TERM HUP
+  rm -rf "$temporary"
+  printf 'Downloaded agenticmode (%s) to %s\n' "$install_ref" "$install_root"
+  "$install_root/install.sh" "$@"
+  exit $?
+}
+
+if [ ! -f "$source_file" ] && [ ! -f "$helper_source" ]; then
+  bootstrap_remote_install "$@"
+fi
 
 if [ ! -f "$source_file" ]; then
   printf 'install.sh: %s was not found\n' "$source_file" >&2
