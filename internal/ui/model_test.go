@@ -176,6 +176,27 @@ func TestRenderRespectsTerminalGeometry(t *testing.T) {
 	}
 }
 
+func TestMenusUseStableLeftInset(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{20, 5}, {80, 20}, {160, 40}} {
+		m := NewModel(launcherRequest()).SkipSplash()
+		m.width, m.height = size.width, size.height
+		frame := m.Render()
+		found := false
+		for _, line := range strings.Split(frame, "\n") {
+			if !strings.Contains(line, "Keep awake") {
+				continue
+			}
+			found = true
+			if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
+				t.Fatalf("%dx%d heading is not anchored at column 3: %q", size.width, size.height, line)
+			}
+		}
+		if !found {
+			t.Fatalf("%dx%d frame omitted its heading:\n%s", size.width, size.height, frame)
+		}
+	}
+}
+
 func TestScrolledListKeepsSelectedOptionVisible(t *testing.T) {
 	m := NewModel(launcherRequest()).SkipSplash()
 	m.screen = screenMain
