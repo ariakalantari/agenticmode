@@ -15,7 +15,7 @@ import (
 	"github.com/ariakalantari/agenticmode/internal/ui"
 )
 
-const version = "1.4.0"
+const version = "1.4.1"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {

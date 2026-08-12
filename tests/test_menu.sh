@@ -49,7 +49,7 @@ cat > "$helper" <<'MOCK_HELPER'
 set -eu
 case "${1:-}" in
   --protocol-version) printf '1\n'; exit 0 ;;
-  --version) printf 'agenticmode-ui 1.4.0\n'; exit 0 ;;
+  --version) printf 'agenticmode-ui 1.4.1\n'; exit 0 ;;
 esac
 [ "$1" = "menu" ]
 [ ! -e "$3" ]
@@ -143,7 +143,7 @@ assert_no_power_change
 printf 'Test: helper version mismatch fails without power changes\n'
 : > "$pmset_log"
 cp "$helper" "$test_root/fake-ui-mismatch"
-sed 's/agenticmode-ui 1.4.0/agenticmode-ui 9.9.9/' "$test_root/fake-ui-mismatch" > "$test_root/fake-ui-mismatch.next"
+sed 's/agenticmode-ui 1.4.1/agenticmode-ui 9.9.9/' "$test_root/fake-ui-mismatch" > "$test_root/fake-ui-mismatch.next"
 mv "$test_root/fake-ui-mismatch.next" "$test_root/fake-ui-mismatch"
 chmod 755 "$test_root/fake-ui-mismatch"
 AGENTICMODE_UI_BIN="$test_root/fake-ui-mismatch" run_menu_pty && { printf 'Mismatched helper succeeded\n' >&2; exit 1; }

@@ -2,7 +2,7 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.4.0"
+readonly AGENTICMODE_VERSION="1.4.1"
 readonly AGENTICMODE_NAME="agenticmode"
 readonly AGENTICMODE_FORMULA="ariakalantari/agenticmode/agenticmode"
 readonly AGENTICMODE_RELEASE_BASE_URL="https://github.com/ariakalantari/agenticmode/releases"

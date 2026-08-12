@@ -32,7 +32,7 @@ func writeRequest(t *testing.T, root string) string {
 }
 
 func TestVersionAndProtocolVersion(t *testing.T) {
-	for _, test := range []struct{ arg, want string }{{"--version", "agenticmode-ui 1.4.0\n"}, {"--protocol-version", "1\n"}} {
+	for _, test := range []struct{ arg, want string }{{"--version", "agenticmode-ui 1.4.1\n"}, {"--protocol-version", "1\n"}} {
 		var out bytes.Buffer
 		if err := run([]string{test.arg}, &out); err != nil {
 			t.Fatal(err)
