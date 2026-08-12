@@ -56,7 +56,8 @@ func (m Model) Render() string {
 	if height < 9 || width < 24 {
 		return m.renderMinimal(width, height)
 	}
-	innerWidth := width - 4
+	leftInset, rightInset := menuInsets(width)
+	innerWidth := width - leftInset - rightInset
 	if innerWidth < 1 {
 		innerWidth = width
 	}
@@ -67,24 +68,30 @@ func (m Model) Render() string {
 
 	content := m.renderContent(innerWidth, bodyHeight)
 	content = constrain(content, innerWidth, bodyHeight)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
+	return placeMenu(width, height, leftInset, content)
 }
 
 func (m Model) renderMinimal(width, height int) string {
+	leftInset, rightInset := menuInsets(width)
+	contentWidth := width - leftInset - rightInset
+	if contentWidth < 1 {
+		contentWidth = width
+		leftInset = 0
+	}
 	styles := m.styles()
 	heading, _ := m.heading()
-	lines := []string{styles.heading.Render(textutil.Clip(heading, width))}
+	lines := []string{styles.heading.Render(textutil.Clip(heading, contentWidth))}
 	if m.screen == screenNumber {
 		if height >= 3 {
-			lines = append(lines, textutil.Clip("> "+m.numberValue+"_", width))
+			lines = append(lines, textutil.Clip("> "+m.numberValue+"_", contentWidth))
 		}
 		if height >= 4 && m.numberError != "" {
-			lines = append(lines, styles.error.Render(textutil.Clip(m.numberError, width)))
+			lines = append(lines, styles.error.Render(textutil.Clip(m.numberError, contentWidth)))
 		}
 		if height >= 5 {
-			lines = append(lines, styles.dim.Render(textutil.Clip("Enter confirm  Esc back", width)))
+			lines = append(lines, styles.dim.Render(textutil.Clip("Enter  Esc back", contentWidth)))
 		}
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, constrain(strings.Join(lines, "\n"), width, height))
+		return placeMenu(width, height, leftInset, constrain(strings.Join(lines, "\n"), contentWidth, height))
 	}
 	options := m.options()
 	if height >= 3 && len(options) > 0 {
@@ -92,12 +99,12 @@ func (m Model) renderMinimal(width, height int) string {
 		if cursor >= len(options) {
 			cursor = len(options) - 1
 		}
-		lines = append(lines, styles.selected.Render(textutil.Clip("> "+options[cursor].label, width)))
+		lines = append(lines, styles.selected.Render(textutil.Clip("> "+options[cursor].label, contentWidth)))
 	}
 	if height >= 5 {
-		lines = append(lines, styles.dim.Render(textutil.Clip("Arrows move  Enter choose", width)))
+		lines = append(lines, styles.dim.Render(textutil.Clip("Move j/k  Enter", contentWidth)))
 	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, constrain(strings.Join(lines, "\n"), width, height))
+	return placeMenu(width, height, leftInset, constrain(strings.Join(lines, "\n"), contentWidth, height))
 }
 
 func (m Model) renderContent(width, height int) string {
@@ -385,4 +392,25 @@ func constrain(content string, width, height int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func menuInsets(width int) (int, int) {
+	if width < 5 {
+		return 0, 0
+	}
+	return 2, 2
+}
+
+func placeMenu(width, height, leftInset int, content string) string {
+	if leftInset > 0 {
+		prefix := strings.Repeat(" ", leftInset)
+		lines := strings.Split(content, "\n")
+		for index, line := range lines {
+			if line != "" {
+				lines[index] = prefix + line
+			}
+		}
+		content = strings.Join(lines, "\n")
+	}
+	return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Center, content)
 }
