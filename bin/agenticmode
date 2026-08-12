@@ -27,6 +27,7 @@ agentic_shasum=/usr/bin/shasum
 agentic_tar=/usr/bin/tar
 agentic_cmp=/usr/bin/cmp
 agentic_tput=/usr/bin/tput
+agentic_stty=/bin/stty
 agentic_plutil=/usr/bin/plutil
 if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_pmset="${AGENTICMODE_PMSET_BIN:-$agentic_pmset}"
@@ -47,6 +48,7 @@ if [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then
   agentic_tar="${AGENTICMODE_TAR_BIN:-$agentic_tar}"
   agentic_cmp="${AGENTICMODE_CMP_BIN:-$agentic_cmp}"
   agentic_tput="${AGENTICMODE_TPUT_BIN:-$agentic_tput}"
+  agentic_stty="${AGENTICMODE_STTY_BIN:-$agentic_stty}"
   agentic_plutil="${AGENTICMODE_PLUTIL_BIN:-$agentic_plutil}"
 fi
 agentic_watchdog_bin=/Library/PrivilegedHelperTools/com.ariakalantari.agenticmode.watchdog
@@ -142,6 +144,8 @@ agentic_ui_events=()
 agentic_ui_target_keys=()
 agentic_ui_target_states=()
 agentic_ui_target_titles=()
+agentic_terminal_columns=""
+agentic_terminal_lines=""
 
 agentic_stdout_reset=""
 agentic_stdout_cyan=""
@@ -227,12 +231,28 @@ terminal_stream_is_interactive() {
   [ -t "$descriptor" ]
 }
 
+terminal_read_live_dimensions() {
+  local size="" lines="" columns=""
+  agentic_terminal_columns=""
+  agentic_terminal_lines=""
+  [ -x "$agentic_stty" ] || return 1
+  size=$("$agentic_stty" size 2>/dev/null < /dev/tty || true)
+  IFS=' ' read -r lines columns <<< "$size"
+  case "$lines" in ''|*[!0-9]*) return 1 ;; esac
+  case "$columns" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$lines" -ge 1 ] && [ "$columns" -ge 1 ] || return 1
+  agentic_terminal_lines="$lines"
+  agentic_terminal_columns="$columns"
+}
+
 terminal_columns() {
   local descriptor="${1:-1}" columns=""
   if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_COLUMNS:-}" ]; then
     columns="$AGENTICMODE_TEST_COLUMNS"
   elif terminal_stream_is_interactive "$descriptor" && [ -x "$agentic_tput" ] && [ "${TERM:-dumb}" != "dumb" ]; then
-    columns=$("$agentic_tput" cols 2>/dev/null || true)
+    terminal_read_live_dimensions || true
+    columns="$agentic_terminal_columns"
+    [ -n "$columns" ] || columns=$("$agentic_tput" cols 2>/dev/null || true)
   fi
   case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
   [ "$columns" -ge 1 ] || columns=1
@@ -1400,19 +1420,22 @@ terminal_ui_can_start() {
 
 terminal_ui_refresh_dimensions() {
   local columns="" lines=""
+  terminal_read_live_dimensions || true
   if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_COLUMNS_FILE:-}" ]; then
     columns=$(cat "$AGENTICMODE_TEST_COLUMNS_FILE" 2>/dev/null || true)
   elif [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_COLUMNS:-}" ]; then
     columns="$AGENTICMODE_TEST_COLUMNS"
   else
-    columns=$("$agentic_tput" cols 2>/dev/null || true)
+    columns="$agentic_terminal_columns"
+    [ -n "$columns" ] || columns=$("$agentic_tput" cols 2>/dev/null || true)
   fi
   if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_LINES_FILE:-}" ]; then
     lines=$(cat "$AGENTICMODE_TEST_LINES_FILE" 2>/dev/null || true)
   elif [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_LINES:-}" ]; then
     lines="$AGENTICMODE_TEST_LINES"
   else
-    lines=$("$agentic_tput" lines 2>/dev/null || true)
+    lines="$agentic_terminal_lines"
+    [ -n "$lines" ] || lines=$("$agentic_tput" lines 2>/dev/null || true)
   fi
   case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
   case "$lines" in ''|*[!0-9]*) lines=24 ;; esac
@@ -1669,15 +1692,17 @@ terminal_ui_build_screen() {
 }
 
 terminal_ui_render() {
-  local row text style rendered old_text old_style old_rendered column buffer resized="$agentic_ui_resized" changed=0
-  if [ "$resized" -eq 1 ]; then
+  local row text style rendered old_text old_style old_rendered column buffer resized=0 changed=0
+  if [ "$agentic_ui_resized" -eq 1 ]; then
+    agentic_ui_resized=0
     terminal_ui_refresh_dimensions
     agentic_ui_previous=()
     agentic_ui_previous_style=()
     agentic_ui_previous_render=()
-    agentic_ui_resized=0
+    resized=1
   fi
   terminal_ui_build_screen
+  [ "$agentic_ui_resized" -eq 0 ] || return 0
   buffer=$'\033[?2026h'
   if [ "$resized" -eq 1 ]; then
     buffer="${buffer}${agentic_ui_clear}"
@@ -1709,6 +1734,7 @@ terminal_ui_render() {
     fi
     row=$((row + 1))
   done
+  [ "$agentic_ui_resized" -eq 0 ] || return 0
   [ "$changed" -eq 1 ] || return 0
   buffer="${buffer}"$'\033[?2026l'
   printf '%s' "$buffer"
@@ -1757,7 +1783,7 @@ terminal_ui_start() {
   agentic_ui_target_keys=()
   agentic_ui_target_states=()
   agentic_ui_target_titles=()
-  trap 'agentic_ui_resized=1' WINCH
+  trap terminal_ui_handle_resize WINCH
   printf '%s%s%s' "$agentic_ui_smcup" "$agentic_ui_clear" "$agentic_ui_civis"
 }
 
@@ -1841,6 +1867,11 @@ wake_controller_timer() {
   kill -CONT "$agentic_timer_pid" 2>/dev/null || true
 }
 
+terminal_ui_handle_resize() {
+  agentic_ui_resized=1
+  wake_controller_timer
+}
+
 handle_signal() {
   local code="$1"
   if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ "${AGENTICMODE_TEST_IGNORE_TERM:-0}" = "1" ] && [ "$code" -eq 143 ]; then
@@ -1871,8 +1902,14 @@ install_controller_traps() {
 
 controller_pause() {
   local duration="$1" wait_status=0
+  if [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_ui_resized" -eq 1 ]; then
+    return 1
+  fi
   "$agentic_sleep" "$duration" &
   agentic_timer_pid=$!
+  if [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_ui_resized" -eq 1 ]; then
+    wake_controller_timer
+  fi
   wait "$agentic_timer_pid" 2>/dev/null || wait_status=$?
   if kill -0 "$agentic_timer_pid" 2>/dev/null; then
     kill -TERM "$agentic_timer_pid" 2>/dev/null || true
@@ -1931,6 +1968,7 @@ controller_sleep() {
     fi
     agentic_ui_frame=56
     terminal_ui_render
+    [ "$agentic_ui_resized" -eq 0 ] || continue
     remaining=$((deadline - SECONDS))
     until_animation=$((agentic_ui_next_animation_clock - SECONDS))
     if [ "$until_animation" -gt 0 ] && [ "$until_animation" -lt "$remaining" ]; then remaining="$until_animation"; fi

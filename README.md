@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/agenticmode-wordmark.svg" width="760" alt="">
+</p>
+
 # Agentic Mode
 
 [![CI](https://github.com/ariakalantari/agenticmode/actions/workflows/ci.yml/badge.svg)](https://github.com/ariakalantari/agenticmode/actions/workflows/ci.yml)

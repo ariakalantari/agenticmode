@@ -77,7 +77,16 @@ printf '%s\n' "$*" >> "$AGENTICMODE_TEST_SUDO_LOG"
 exec "$@"
 MOCK
 
-chmod 755 "$mock_bin/pmset" "$mock_bin/sudo"
+cat > "$mock_bin/tput-stale" <<'MOCK'
+#!/bin/bash
+case "${1:-}" in
+  cols) printf '79\n' ;;
+  lines) printf '25\n' ;;
+  *) exec /usr/bin/tput "$@" ;;
+esac
+MOCK
+
+chmod 755 "$mock_bin/pmset" "$mock_bin/sudo" "$mock_bin/tput-stale"
 
 export AGENTICMODE_TESTING=1
 export AGENTICMODE_PMSET_BIN="$mock_bin/pmset"
@@ -142,6 +151,16 @@ assert_cursor_bounds() {
   fi
   printf 'Terminal cursor write exceeded %sx%s in %s\n' "$maximum_column" "$maximum_row" "$file" >&2
   exit 1
+}
+
+assert_cursor_bounds_after_last_clear() {
+  file="$1"
+  maximum_row="$2"
+  maximum_column="$3"
+  section=$(mktemp "${TMPDIR:-/tmp}/agenticmode-screen.XXXXXX")
+  /usr/bin/perl -0777 -e 'my $data = <>; my @screens = split(/(?:\x1b\[H\x1b\[2J|\x1b\[2J\x1b\[H)/, $data, -1); print $screens[-1];' "$file" > "$section"
+  assert_cursor_bounds "$section" "$maximum_row" "$maximum_column"
+  rm -f "$section"
 }
 
 wait_for_contains() {
@@ -783,6 +802,50 @@ assert_equals 75 "$current_ui_status"
 wait_for_value 0 "$pmset_state"
 assert_contains $'\033[?1049l' "$test_root/current-ui.log"
 assert_not_contains "Raw parent user prompt" "$test_root/current-ui.log"
+
+printf 'Test: full-screen UI follows live PTY geometry instead of inherited dimensions\n'
+set +e
+AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_LOG="$test_root/live-pty-resize.log" \
+  AGENTICMODE_EXPECT_TPUT="$mock_bin/tput-stale" \
+  /usr/bin/expect <<'EXPECT_RESIZE' > "$test_root/live-pty-resize.expect.log" 2>&1
+log_file -noappend $env(AGENTICMODE_EXPECT_LOG)
+set timeout 12
+set env(COLUMNS) 79
+set env(LINES) 25
+set env(TERM) xterm-256color
+set env(NO_COLOR) 1
+set env(AGENTICMODE_TPUT_BIN) $env(AGENTICMODE_EXPECT_TPUT)
+spawn -noecho $env(AGENTICMODE_EXPECT_BIN) --poll 300 --timeout 3s
+set terminal $spawn_out(slave,name)
+expect {
+  "AWAKE - sleep override active" {}
+  timeout { exit 2 }
+}
+exec /bin/stty rows 30 columns 100 < $terminal
+expect {
+  "+------------------------------------------------------------------------------------------+" {}
+  timeout { exit 3 }
+}
+exec /bin/stty rows 18 columns 50 < $terminal
+expect {
+  "A G E N T I C" {}
+  timeout { exit 4 }
+}
+exec kill -TERM [exp_pid]
+expect eof
+set status [lindex [wait] 3]
+exit $status
+EXPECT_RESIZE
+live_resize_status=$?
+set -e
+[ "$live_resize_status" -eq 143 ] || dump_logs
+assert_equals 143 "$live_resize_status"
+wait_for_value 0 "$pmset_state"
+assert_contains "+------------------------------------------------------------------------------------------+" "$test_root/live-pty-resize.log"
+assert_contains $'\033[5;19HA G E N T I C' "$test_root/live-pty-resize.log"
+assert_contains $'\033[8;3H+--------------------------------------------+' "$test_root/live-pty-resize.log"
+assert_cursor_bounds_after_last_clear "$test_root/live-pty-resize.log" 18 50
 
 printf 'Test: caller thread exclusion prevents self-deadlock\n'
 clear_codex_fixtures
