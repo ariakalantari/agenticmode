@@ -106,7 +106,7 @@ while [ "$interrupted" -eq 0 ]; do
   "$sleep_bin" "$poll"
 done
 
-trap - INT TERM HUP
+trap '' INT TERM HUP
 if restore_sleep_value; then debug_log "restored baseline=$baseline"; exit 0; fi
 debug_log "restore failed baseline=$baseline"
 exit 1

@@ -91,7 +91,7 @@ For interactive agents, prefer `run --` when possible. Long-lived TUI processes 
 
 ## Terminal status
 
-Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a left-aligned status panel, elapsed time, tracked-run progress, Codex session titles, and an animated laptop. Every status occupies one physical line: long content ends in `...`, and resizing the terminal immediately redraws the view to reveal or trim content. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
+Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a status panel, showing as many tracked runs as the current viewport permits, alongside elapsed time, progress, Codex session titles, and a responsive `AGENTIC` / `MODE` wordmark with a subtle shimmer on color terminals. Compact layouts simplify the wordmark, and very small or non-color terminals fall back to a stable static view. Every status occupies one physical line: long content ends in `...`, and resizing the terminal immediately recomputes the layout to reveal or trim content. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
 
 Use `--no-ui` for compact line output, or set `AGENTICMODE_UI=plain` to make that the default. Pipes, redirected output, `TERM=dumb`, and `agenticmode run -- command` always use line output so logs and wrapped-command output remain intact. Interactive line output is capped to a readable measure and truncates with `...` instead of wrapping into misaligned continuation rows.
 

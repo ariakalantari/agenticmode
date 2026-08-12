@@ -201,7 +201,7 @@ clear_codex_fixtures() {
 
 printf 'Test: syntax and version\n'
 /bin/bash -n "$repo_dir/bin/agenticmode" "$repo_dir/libexec/agenticmode-watchdog" "$repo_dir/install.sh" "$repo_dir/uninstall.sh" "$repo_dir/scripts/package-release.sh"
-assert_equals "agenticmode 1.3.1" "$("$repo_dir/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$repo_dir/bin/agenticmode" --version)"
 "$repo_dir/bin/agenticmode" --help > "$test_root/help-command.log"
 assert_contains "agenticmode update" "$test_root/help-command.log"
 assert_contains "--no-ui" "$test_root/help-command.log"
@@ -223,6 +223,48 @@ interrupt_status=$?
 set -e
 assert_equals 130 "$interrupt_status"
 wait_for_value 0 "$pmset_state"
+
+printf 'Test: repeated terminal Ctrl+C cannot interrupt sleep restoration\n'
+printf '0\n' > "$pmset_fail_value_file"
+printf '2\n' > "$pmset_fail_count_file"
+set +e
+TERM=xterm-256color \
+  AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_LOG="$test_root/pty-ctrl-c.log" \
+  /usr/bin/expect <<'EXPECT_CTRL_C' > /dev/null 2>&1 &
+log_file -noappend $env(AGENTICMODE_EXPECT_LOG)
+set timeout 20
+spawn -noecho $env(AGENTICMODE_EXPECT_BIN) --poll 300
+expect {
+  "System sleep is disabled" {}
+  timeout { exit 2 }
+}
+expect {
+  -exact "\033\[?2026l" {}
+  timeout { exit 3 }
+}
+send "\003"
+after 200
+send "\003\003"
+expect eof
+EXPECT_CTRL_C
+pty_driver_pid=$!
+set -e
+wait_for_value 1 "$pmset_state"
+controller_pid=$(cat "$state_dir/controller.pid")
+wait_for_exit "$controller_pid"
+if ! wait "$pty_driver_pid" 2>/dev/null; then
+  printf 'Repeated Ctrl+C PTY driver failed\n' >&2
+  exit 1
+fi
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+[ ! -e "$state_dir/controller.pid" ] || { printf 'Repeated Ctrl+C left controller state behind\n' >&2; /bin/ls -la "$state_dir" >&2; sed -n '1,240p' "$test_root/pty-ctrl-c.log" >&2; exit 1; }
+[ ! -e "$state_dir/watchdog.pid" ] || { printf 'Repeated Ctrl+C left watchdog state behind\n' >&2; /bin/ls -la "$state_dir" >&2; sed -n '1,240p' "$test_root/pty-ctrl-c.log" >&2; exit 1; }
+assert_contains $'\033[?1049l' "$test_root/pty-ctrl-c.log"
+assert_contains "Stopping agenticmode and restoring the prior sleep setting" "$test_root/pty-ctrl-c.log"
+printf 'none\n' > "$pmset_fail_value_file"
+printf '0\n' > "$pmset_fail_count_file"
 
 printf 'Test: cleanup preserves an existing SleepDisabled baseline\n'
 printf '1\n' > "$pmset_state"
@@ -275,6 +317,49 @@ wait_for_exit "$controller_pid"
 wait "$controller_pid" 2>/dev/null || true
 controller_pid=""
 wait_for_value 0 "$pmset_state"
+
+printf 'Test: restart fails closed when a released watchdog loses identity metadata\n'
+: > "$pmset_log"
+"$repo_dir/bin/agenticmode" > "$test_root/missing-watchdog-identity-old.log" 2>&1 &
+controller_pid=$!
+wait_for_contains "System sleep is disabled" "$test_root/missing-watchdog-identity-old.log"
+watchdog_pid=$(cat "$state_dir/watchdog.pid")
+watchdog_started=$(cat "$state_dir/watchdog.process-started")
+kill -STOP "$watchdog_pid"
+printf 'corrupt process start\n' > "$state_dir/watchdog.process-started"
+kill -KILL "$controller_pid"
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+if env AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS=2 \
+  "$repo_dir/bin/agenticmode" > "$test_root/corrupt-watchdog-identity-restart.log" 2>&1; then
+  printf 'Restart unexpectedly trusted inconsistent watchdog identity\n' >&2
+  exit 1
+fi
+assert_contains "could not verify that the previous watchdog exited" "$test_root/corrupt-watchdog-identity-restart.log"
+printf '999999\n' > "$state_dir/watchdog.pid"
+printf '%s\n' "$watchdog_started" > "$state_dir/watchdog.process-started"
+if env AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS=2 \
+  "$repo_dir/bin/agenticmode" > "$test_root/corrupt-watchdog-pid-restart.log" 2>&1; then
+  printf 'Restart unexpectedly trusted a corrupted watchdog PID\n' >&2
+  exit 1
+fi
+assert_contains "could not verify that the previous watchdog exited" "$test_root/corrupt-watchdog-pid-restart.log"
+rm -f "$state_dir/watchdog.pid" "$state_dir/watchdog.process-started"
+if env AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS=2 \
+  "$repo_dir/bin/agenticmode" > "$test_root/missing-watchdog-identity-restart.log" 2>&1; then
+  printf 'Restart unexpectedly competed with a watchdog whose identity was missing\n' >&2
+  exit 1
+fi
+assert_contains "could not verify that the previous watchdog exited" "$test_root/missing-watchdog-identity-restart.log"
+assert_equals 1 "$(cat "$pmset_state")"
+assert_occurrences 1 "-a disablesleep 1" "$pmset_log"
+kill -CONT "$watchdog_pid"
+wait_for_exit "$watchdog_pid"
+wait_for_value 0 "$pmset_state"
+printf '%s\n' "$watchdog_pid" > "$state_dir/watchdog.pid"
+printf '%s\n' "$watchdog_started" > "$state_dir/watchdog.process-started"
+env AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS=2 \
+  "$repo_dir/bin/agenticmode" off > "$test_root/missing-watchdog-identity-off.log" 2>&1
 
 printf 'Test: off is safe during the watchdog registration gap\n'
 : > "$pmset_log"
@@ -382,7 +467,7 @@ wait_for_value 0 "$pmset_state"
 printf 'none\n' > "$pmset_fail_value_file"
 printf '0\n' > "$pmset_fail_count_file"
 
-printf 'Test: failed restoration is reported and recoverable with off\n'
+printf 'Test: failed restoration is reported and recovered on restart\n'
 printf '0\n' > "$pmset_fail_value_file"
 printf '10\n' > "$pmset_fail_count_file"
 "$repo_dir/bin/agenticmode" > "$test_root/restore-failure.log" 2>&1 &
@@ -399,7 +484,13 @@ assert_equals 1 "$(cat "$pmset_state")"
 assert_contains "did not confirm sleep restoration" "$test_root/restore-failure.log"
 printf 'none\n' > "$pmset_fail_value_file"
 printf '0\n' > "$pmset_fail_count_file"
-"$repo_dir/bin/agenticmode" off > "$test_root/restore-failure-off.log" 2>&1
+set +e
+"$repo_dir/bin/agenticmode" --timeout 1s > "$test_root/restore-failure-restart.log" 2>&1
+recovery_restart_status=$?
+set -e
+assert_equals 75 "$recovery_restart_status"
+assert_contains "Recovering the previous watchdog's unfinished sleep restoration" "$test_root/restore-failure-restart.log"
+assert_not_contains "try agenticmode off again" "$test_root/restore-failure-restart.log"
 wait_for_value 0 "$pmset_state"
 
 printf 'Test: state transitions use an atomic operating-system lock\n'
@@ -674,16 +765,16 @@ TERM=xterm-256color NO_COLOR=1 \
   "$repo_dir/bin/agenticmode" current --no-processes --timeout 3s > "$test_root/current-ui.log" 2>&1 &
 controller_pid=$!
 wait_for_contains "Responsive session title expands across the terminal width" "$test_root/current-ui.log"
-assert_contains $'\033[6;5HA G E N T I C   M O D E' "$test_root/current-ui.log"
+assert_contains $'\033[5;30H ###   #### ##### #   # ##### #####  ####' "$test_root/current-ui.log"
 assert_contains $'\033[17;5H+------------------------------------------------------------------------------------------+' "$test_root/current-ui.log"
 assert_contains $'\033[22;5H|  WORKING   Responsive session title expands across the terminal width' "$test_root/current-ui.log"
 printf '50\n' > "$ui_columns_file"
 printf '18\n' > "$ui_lines_file"
 kill -WINCH "$controller_pid"
 wait_for_contains "Responsive session title expa..." "$test_root/current-ui.log"
-assert_contains $'\033[3;3HA G E N T I C   M O D E' "$test_root/current-ui.log"
-assert_contains $'\033[11;3H+--------------------------------------------+' "$test_root/current-ui.log"
-assert_contains $'\033[13;3H|  WORKING   Responsive session title expa...' "$test_root/current-ui.log"
+assert_contains $'\033[5;19HA G E N T I C' "$test_root/current-ui.log"
+assert_contains $'\033[8;3H+--------------------------------------------+' "$test_root/current-ui.log"
+assert_contains $'\033[10;3H|  WORKING   Responsive session title expa...' "$test_root/current-ui.log"
 wait "$controller_pid"
 current_ui_status=$?
 controller_pid=""
@@ -780,13 +871,15 @@ ui_lines_file="$test_root/ui-lines"
 printf '80\n' > "$ui_columns_file"
 printf '24\n' > "$ui_lines_file"
 set +e
-TERM=xterm-256color FORCE_COLOR=1 \
+env -u NO_COLOR TERM=xterm-256color FORCE_COLOR=1 \
   AGENTICMODE_TEST_FORCE_TTY=1 \
   AGENTICMODE_TEST_COLUMNS_FILE="$ui_columns_file" \
   AGENTICMODE_TEST_LINES_FILE="$ui_lines_file" \
   "$repo_dir/bin/agenticmode" --timeout 2s > "$test_root/full-screen-ui.log" 2>&1 &
 controller_pid=$!
 wait_for_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
+wait_for_contains "AWAKE - sleep override active" "$test_root/full-screen-ui.log"
+wait_for_contains $'\033[97m\033[1m' "$test_root/full-screen-ui.log"
 printf '44\n' > "$ui_columns_file"
 printf '14\n' > "$ui_lines_file"
 kill -WINCH "$controller_pid"
@@ -799,8 +892,9 @@ assert_equals 75 "$full_screen_status"
 wait_for_value 0 "$pmset_state"
 assert_contains $'\033[?1049h' "$test_root/full-screen-ui.log"
 assert_contains $'\033[?2026h' "$test_root/full-screen-ui.log"
-assert_contains "A G E N T I C   M O D E" "$test_root/full-screen-ui.log"
+assert_contains $'\033[97m\033[1m' "$test_root/full-screen-ui.log"
 assert_contains "AWAKE - sleep override active" "$test_root/full-screen-ui.log"
+assert_not_contains "/        AWAKE         /" "$test_root/full-screen-ui.log"
 assert_contains $'\033[?1049l' "$test_root/full-screen-ui.log"
 assert_contains "Maximum duration reached" "$test_root/full-screen-ui.log"
 
@@ -820,7 +914,11 @@ for ui_size in 8x5 1000x400; do
   wait_for_value 0 "$pmset_state"
   assert_cursor_bounds "$test_root/ui-${ui_size}.log" "$ui_lines" "$ui_columns"
 done
-assert_contains $'\033[191;455H' "$test_root/ui-1000x400.log"
+assert_contains $'\033[191;480H' "$test_root/ui-1000x400.log"
+assert_contains $'\033[203;5H+' "$test_root/ui-1000x400.log"
+assert_contains " ###   #### ##### #   # ##### #####  ####" "$test_root/ui-1000x400.log"
+assert_contains "         #   #  ###  ####  #####" "$test_root/ui-1000x400.log"
+assert_not_contains "_____________________________" "$test_root/ui-1000x400.log"
 
 printf 'Test: full-screen UI restores the terminal on controller signals\n'
 for signal_case in TERM:143 HUP:129 TSTP:148; do
@@ -957,12 +1055,63 @@ assert_equals 0 "$(cat "$pmset_state")"
 assert_equals "sleep_disabled=0
 controller=inactive" "$(cat "$test_root/inactive-machine-status.log")"
 
+printf 'Test: off force-stops an exact controller that ignores TERM\n'
+env AGENTICMODE_TEST_IGNORE_TERM=1 \
+  "$repo_dir/bin/agenticmode" --poll 5 > "$test_root/off-force-controller.log" 2>&1 &
+controller_pid=$!
+wait_for_value 1 "$pmset_state"
+env AGENTICMODE_TEST_CONTROLLER_STOP_ATTEMPTS=5 \
+  "$repo_dir/bin/agenticmode" off > "$test_root/off-force.log" 2>&1
+wait_for_exit "$controller_pid"
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+assert_contains "the active controller ignored TERM; forcing its exact process to stop" "$test_root/off-force.log"
+"$repo_dir/bin/agenticmode" status --machine > "$test_root/off-force-status.log" 2>&1
+assert_equals "sleep_disabled=0
+controller=inactive" "$(cat "$test_root/off-force-status.log")"
+
+printf 'Test: forced off refuses when controller state changes after SIGSTOP\n'
+frozen_file="$test_root/off-revalidate-frozen"
+force_continue_file="$test_root/off-revalidate-continue"
+env AGENTICMODE_TEST_IGNORE_TERM=1 \
+  "$repo_dir/bin/agenticmode" --poll 5 > "$test_root/off-revalidate-controller.log" 2>&1 &
+controller_pid=$!
+wait_for_value 1 "$pmset_state"
+controller_started=$(cat "$state_dir/controller.process-started")
+env AGENTICMODE_TEST_CONTROLLER_STOP_ATTEMPTS=2 \
+  AGENTICMODE_TEST_CONTROLLER_FROZEN_FILE="$frozen_file" \
+  AGENTICMODE_TEST_CONTROLLER_FORCE_CONTINUE_FILE="$force_continue_file" \
+  "$repo_dir/bin/agenticmode" off > "$test_root/off-revalidate.log" 2>&1 &
+child_pid=$!
+attempts=0
+while [ ! -e "$frozen_file" ] && [ "$attempts" -lt 80 ]; do
+  /bin/sleep 0.1
+  attempts=$((attempts + 1))
+done
+[ -e "$frozen_file" ] || { printf 'Forced-off freeze hook was not reached\n' >&2; exit 1; }
+printf '999999\n' > "$state_dir/controller.pid"
+: > "$force_continue_file"
+if wait "$child_pid"; then
+  printf 'Forced off unexpectedly continued after controller state changed\n' >&2
+  exit 1
+fi
+child_pid=""
+assert_contains "could not be frozen and revalidated safely" "$test_root/off-revalidate.log"
+printf '%s\n' "$controller_pid" > "$state_dir/controller.pid"
+printf '%s\n' "$controller_started" > "$state_dir/controller.process-started"
+kill -KILL "$controller_pid" 2>/dev/null || true
+wait "$controller_pid" 2>/dev/null || true
+controller_pid=""
+wait_for_value 0 "$pmset_state"
+"$repo_dir/bin/agenticmode" off > "$test_root/off-revalidate-cleanup.log" 2>&1
+
 printf 'Test: installer ownership checks and custom-prefix uninstall\n'
 install_prefix="$test_root/prefix with space"
 PREFIX="$install_prefix" "$repo_dir/install.sh" > "$test_root/install.log" 2>&1
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/agenticmode")"
 assert_equals "$repo_dir/bin/agenticmode" "$(readlink "$install_prefix/bin/am")"
-assert_equals "agenticmode 1.3.1" "$("$install_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.2" "$("$install_prefix/bin/am" --version)"
 PREFIX="$install_prefix" "$repo_dir/install.sh" >> "$test_root/install.log" 2>&1
 rm "$install_prefix/bin/am"
 ln -s /tmp/unrelated-am "$install_prefix/bin/am"
@@ -998,8 +1147,8 @@ mkdir -p "$empty_working_dir"
 remote_root_canonical=$(CDPATH= cd -- "$remote_root" && pwd)
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/agenticmode")"
 assert_equals "$remote_root_canonical/bin/agenticmode" "$(readlink "$remote_prefix/bin/am")"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/am" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/am" --version)"
 [ -f "$remote_root/.agenticmode-remote-install" ] || { printf 'Remote installer marker was not created\n' >&2; exit 1; }
 assert_equals "agenticmode-remote-install:v2
 stable
@@ -1024,11 +1173,11 @@ cp "$repo_dir/config.example" "$release_source/config.example"
 cp "$repo_dir/bin/agenticmode" "$release_source/bin/agenticmode"
 cp "$repo_dir/libexec/agenticmode-watchdog" "$release_source/libexec/agenticmode-watchdog"
 cp "$repo_dir/scripts/package-release.sh" "$release_source/scripts/package-release.sh"
-sed 's/readonly AGENTICMODE_VERSION="1.3.1"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode" "$release_source/scripts/package-release.sh"
-"$release_source/scripts/package-release.sh" v1.3.2 "$release_base/latest/download" > "$test_root/package-release.log"
+"$release_source/scripts/package-release.sh" v1.3.3 "$release_base/latest/download" > "$test_root/package-release.log"
 
 "$repo_dir/bin/agenticmode" > "$test_root/update-active-controller.log" 2>&1 &
 controller_pid=$!
@@ -1054,39 +1203,39 @@ if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$corrupt_release_base" "$remote_pre
   exit 1
 fi
 assert_contains "checksum did not match" "$test_root/update-corrupt.log"
-assert_equals "agenticmode 1.3.1" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
 
 AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-success.log" 2>&1
-assert_contains "Updated agenticmode 1.3.1 -> 1.3.2" "$test_root/update-success.log"
-assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
-assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/am" --version)"
+assert_contains "Updated agenticmode 1.3.2 -> 1.3.3" "$test_root/update-success.log"
+assert_equals "agenticmode 1.3.3" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.3" "$("$remote_prefix/bin/am" --version)"
 AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/agenticmode" update > "$test_root/update-current.log" 2>&1
 assert_contains "already the latest stable release" "$test_root/update-current.log"
 
 rollback_release_base="$test_root/rollback-releases"
 mkdir -p "$rollback_release_base/latest/download"
-sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
+sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.4"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode"
 printf '\n[ "${AGENTICMODE_TESTING:-0}" != "1" ] || exit 42\n' >> "$release_source/install.sh"
-"$release_source/scripts/package-release.sh" v1.3.3 "$rollback_release_base/latest/download" > "$test_root/package-rollback-release.log"
+"$release_source/scripts/package-release.sh" v1.3.4 "$rollback_release_base/latest/download" > "$test_root/package-rollback-release.log"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-rollback.log" 2>&1; then
   printf 'Update unexpectedly succeeded when the staged installer failed\n' >&2
   exit 1
 fi
 assert_contains "previous managed files were restored" "$test_root/update-rollback.log"
-assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.3" "$("$remote_prefix/bin/agenticmode" --version)"
 
 incomplete_rollback_release_base="$test_root/incomplete-rollback-releases"
 mkdir -p "$incomplete_rollback_release_base/latest/download"
 cp "$repo_dir/install.sh" "$release_source/install.sh"
-sed 's/readonly AGENTICMODE_VERSION="1.3.2"/readonly AGENTICMODE_VERSION="1.3.3"/' \
+sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.4"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode"
 printf '\nif [ "${AGENTICMODE_TESTING:-0}" = "1" ]; then chmod 500 "$script_dir/bin"; exit 42; fi\n' >> "$release_source/install.sh"
-"$release_source/scripts/package-release.sh" v1.3.3 "$incomplete_rollback_release_base/latest/download" > "$test_root/package-incomplete-rollback-release.log"
+"$release_source/scripts/package-release.sh" v1.3.4 "$incomplete_rollback_release_base/latest/download" > "$test_root/package-incomplete-rollback-release.log"
 cp "$remote_root/bin/agenticmode" "$test_root/agenticmode-before-incomplete-rollback"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$incomplete_rollback_release_base" "$remote_prefix/bin/am" update > "$test_root/update-incomplete-rollback.log" 2>&1; then
   printf 'Update unexpectedly succeeded when rollback was incomplete\n' >&2
@@ -1095,8 +1244,8 @@ fi
 assert_contains "rollback was incomplete; reinstall agenticmode before running it again" "$test_root/update-incomplete-rollback.log"
 chmod 755 "$remote_root/bin"
 /usr/bin/install -m 755 "$test_root/agenticmode-before-incomplete-rollback" "$remote_root/bin/agenticmode"
-assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
-sed 's/readonly AGENTICMODE_VERSION="1.3.3"/readonly AGENTICMODE_VERSION="1.3.2"/' \
+assert_equals "agenticmode 1.3.3" "$("$remote_prefix/bin/agenticmode" --version)"
+sed 's/readonly AGENTICMODE_VERSION="1.3.4"/readonly AGENTICMODE_VERSION="1.3.3"/' \
   "$release_source/bin/agenticmode" > "$release_source/bin/agenticmode.next"
 mv "$release_source/bin/agenticmode.next" "$release_source/bin/agenticmode"
 chmod 755 "$release_source/bin/agenticmode"
@@ -1105,22 +1254,22 @@ syntax_release_base="$test_root/syntax-releases"
 mkdir -p "$syntax_release_base/latest/download"
 cp "$repo_dir/install.sh" "$release_source/install.sh"
 printf '\ninvalid (\n' >> "$release_source/install.sh"
-"$release_source/scripts/package-release.sh" v1.3.2 "$syntax_release_base/latest/download" > "$test_root/package-syntax-release.log"
+"$release_source/scripts/package-release.sh" v1.3.3 "$syntax_release_base/latest/download" > "$test_root/package-syntax-release.log"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$syntax_release_base" "$remote_prefix/bin/am" update > "$test_root/update-syntax.log" 2>&1; then
   printf 'Update unexpectedly accepted a release with invalid shell syntax\n' >&2
   exit 1
 fi
 assert_contains "failed shell syntax validation" "$test_root/update-syntax.log"
-assert_equals "agenticmode 1.3.2" "$("$remote_prefix/bin/agenticmode" --version)"
+assert_equals "agenticmode 1.3.3" "$("$remote_prefix/bin/agenticmode" --version)"
 
 cp "$remote_root/.agenticmode-remote-install" "$test_root/managed-marker"
-printf 'agenticmode-remote-install:v2\npinned:v1.3.2\n%s\n%s\n' "$remote_root_canonical" "$remote_prefix" > "$remote_root/.agenticmode-remote-install"
+printf 'agenticmode-remote-install:v2\npinned:v1.3.3\n%s\n%s\n' "$remote_root_canonical" "$remote_prefix" > "$remote_root/.agenticmode-remote-install"
 chmod 600 "$remote_root/.agenticmode-remote-install"
 if AGENTICMODE_TEST_RELEASE_BASE_URL="file://$release_base" "$remote_prefix/bin/am" update > "$test_root/update-pinned.log" 2>&1; then
   printf 'Update unexpectedly changed a pinned direct install\n' >&2
   exit 1
 fi
-assert_contains "pinned to v1.3.2" "$test_root/update-pinned.log"
+assert_contains "pinned to v1.3.3" "$test_root/update-pinned.log"
 mv "$test_root/managed-marker" "$remote_root/.agenticmode-remote-install"
 
 chmod 666 "$remote_root/.agenticmode-remote-install"
