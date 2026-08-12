@@ -239,6 +239,10 @@ expect {
   "MENU_STATUS:143" {}
   timeout { exit 3 }
 }
+expect {
+  -exact "bash-3.2$ " {}
+  timeout { exit 6 }
+}
 set after [string trim [exec /bin/stty -g < $terminal]]
 if {$after ne $before} { exit 4 }
 exec /bin/stty echo < $terminal
