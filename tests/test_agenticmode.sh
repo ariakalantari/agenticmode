@@ -285,6 +285,190 @@ assert_contains "Stopping agenticmode and restoring the prior sleep setting" "$t
 printf 'none\n' > "$pmset_fail_value_file"
 printf '0\n' > "$pmset_fail_count_file"
 
+printf 'Test: current repairs Ctrl+C delivery and restores inherited termios\n'
+/bin/sleep 30 &
+child_pid=$!
+current_ctrl_c_lock_ready="$test_root/current-ctrl-c-lock-ready"
+set +e
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_PID="$child_pid" \
+  AGENTICMODE_EXPECT_PMSET_STATE="$pmset_state" \
+  AGENTICMODE_EXPECT_OPERATION_FILE="$state_dir/operation.lockfile" \
+  AGENTICMODE_EXPECT_LOCK_READY="$current_ctrl_c_lock_ready" \
+  AGENTICMODE_EXPECT_LOG="$test_root/current-ctrl-c.log" \
+  AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE="$test_root/current-ctrl-c-captured-termios" \
+  AGENTICMODE_TEST_TERMIOS_RESTORED_FILE="$test_root/current-ctrl-c-restored-termios" \
+  /usr/bin/expect <<'EXPECT_CURRENT_CTRL_C' > "$test_root/current-ctrl-c.expect.log" 2>&1
+log_file -noappend $env(AGENTICMODE_EXPECT_LOG)
+set timeout 20
+spawn -noecho /bin/bash --noprofile --norc
+set terminal $spawn_out(slave,name)
+exec /bin/stty -isig intr undef < $terminal
+set saved [string trim [exec /bin/stty -g < $terminal]]
+send -- "$env(AGENTICMODE_EXPECT_BIN) current --no-codex --no-processes --no-activities --pid $env(AGENTICMODE_EXPECT_PID) --poll 300; echo AGENTIC_STATUS:\$?\r"
+expect {
+  "AWAKE - sleep override active" {}
+  timeout { exit 2 }
+}
+exec /bin/bash -c {exec 9>"$1"; /usr/bin/lockf -s 9; : > "$2"; /bin/sleep 2} holder $env(AGENTICMODE_EXPECT_OPERATION_FILE) $env(AGENTICMODE_EXPECT_LOCK_READY) &
+set locked 0
+for {set attempt 0} {$attempt < 40} {incr attempt} {
+  if {[file exists $env(AGENTICMODE_EXPECT_LOCK_READY)]} { set locked 1; break }
+  after 50
+}
+if {!$locked} { exit 5 }
+send -- "\003\003\003"
+set restored_sleep 0
+for {set attempt 0} {$attempt < 80} {incr attempt} {
+  set handle [open $env(AGENTICMODE_EXPECT_PMSET_STATE) r]
+  set value [string trim [read $handle]]
+  close $handle
+  if {$value eq "0"} { set restored_sleep 1; break }
+  after 50
+}
+if {!$restored_sleep} { exit 6 }
+send -- "\003"
+expect {
+  "AGENTIC_STATUS:130" {}
+  timeout { exit 3 }
+}
+set restored_file $env(AGENTICMODE_TEST_TERMIOS_RESTORED_FILE)
+set restored_ready 0
+for {set attempt 0} {$attempt < 40} {incr attempt} {
+  if {[file exists $restored_file]} { set restored_ready 1; break }
+  after 50
+}
+if {!$restored_ready} { exit 8 }
+set restored_handle [open $restored_file r]
+set restored [string trim [read $restored_handle]]
+close $restored_handle
+set captured_handle [open $env(AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE) r]
+set captured [string trim [read $captured_handle]]
+close $captured_handle
+if {$restored ne $captured} { exit 4 }
+exec /bin/stty -echo < $terminal
+send -- "printf 'AGENTIC_SENTINEL_OK\\n'\r"
+expect {
+  "AGENTIC_SENTINEL_OK" {}
+  timeout { exit 7 }
+}
+exec /bin/stty echo < $terminal
+send -- "exit\r"
+expect eof
+exit 0
+EXPECT_CURRENT_CTRL_C
+current_ctrl_c_status=$?
+set -e
+kill -TERM "$child_pid" 2>/dev/null || true
+wait "$child_pid" 2>/dev/null || true
+child_pid=""
+[ "$current_ctrl_c_status" -eq 0 ] || dump_logs
+assert_equals 0 "$current_ctrl_c_status"
+wait_for_value 0 "$pmset_state"
+assert_contains $'\033[?1049l' "$test_root/current-ctrl-c.log"
+[ ! -e "$state_dir/controller.pid" ] || { printf 'Current Ctrl+C left controller state behind\n' >&2; exit 1; }
+[ ! -e "$state_dir/watchdog.pid" ] || { printf 'Current Ctrl+C left watchdog state behind\n' >&2; exit 1; }
+
+printf 'Test: redirected current still repairs terminal Ctrl+C\n'
+/bin/sleep 30 &
+child_pid=$!
+set +e
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_PID="$child_pid" \
+  AGENTICMODE_EXPECT_PMSET_STATE="$pmset_state" \
+  AGENTICMODE_EXPECT_OUTPUT="$test_root/redirected-current-output.log" \
+  AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE="$test_root/redirected-current-captured-termios" \
+  AGENTICMODE_TEST_TERMIOS_RESTORED_FILE="$test_root/redirected-current-restored-termios" \
+  /usr/bin/expect <<'EXPECT_REDIRECTED_CURRENT' > "$test_root/redirected-current.expect.log" 2>&1
+set timeout 20
+spawn -noecho /bin/bash --noprofile --norc
+set terminal $spawn_out(slave,name)
+exec /bin/stty -isig intr undef < $terminal
+set saved [string trim [exec /bin/stty -g < $terminal]]
+send -- "$env(AGENTICMODE_EXPECT_BIN) current --no-codex --no-processes --no-activities --pid $env(AGENTICMODE_EXPECT_PID) --poll 300 > $env(AGENTICMODE_EXPECT_OUTPUT) 2>&1; echo REDIRECTED_STATUS:\$?\r"
+set active 0
+for {set attempt 0} {$attempt < 80} {incr attempt} {
+  set handle [open $env(AGENTICMODE_EXPECT_PMSET_STATE) r]
+  set value [string trim [read $handle]]
+  close $handle
+  if {$value eq "1"} { set active 1; break }
+  after 100
+}
+if {!$active} { exit 2 }
+send -- "\003\003\003"
+expect {
+  "REDIRECTED_STATUS:130" {}
+  timeout { exit 3 }
+}
+set restored_file $env(AGENTICMODE_TEST_TERMIOS_RESTORED_FILE)
+set restored_handle [open $restored_file r]
+set restored [string trim [read $restored_handle]]
+close $restored_handle
+set captured_handle [open $env(AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE) r]
+set captured [string trim [read $captured_handle]]
+close $captured_handle
+if {$restored ne $captured} { exit 4 }
+send -- "exit\r"
+expect eof
+exit 0
+EXPECT_REDIRECTED_CURRENT
+redirected_current_status=$?
+set -e
+kill -TERM "$child_pid" 2>/dev/null || true
+wait "$child_pid" 2>/dev/null || true
+child_pid=""
+[ "$redirected_current_status" -eq 0 ] || dump_logs
+assert_equals 0 "$redirected_current_status"
+wait_for_value 0 "$pmset_state"
+assert_not_contains $'\033[?1049h' "$test_root/redirected-current-output.log"
+
+printf 'Test: background current never seizes the foreground terminal\n'
+/bin/sleep 30 &
+child_pid=$!
+set +e
+TERM=xterm-256color NO_COLOR=1 \
+  AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_PID="$child_pid" \
+  AGENTICMODE_EXPECT_PMSET_STATE="$pmset_state" \
+  AGENTICMODE_EXPECT_LOG="$test_root/background-current.log" \
+  /usr/bin/expect <<'EXPECT_BACKGROUND_CURRENT' > "$test_root/background-current.expect.log" 2>&1
+log_file -noappend $env(AGENTICMODE_EXPECT_LOG)
+set timeout 20
+spawn -noecho /bin/bash --noprofile --norc
+send -- "PS1='AGENTIC_BG> '\r"
+expect "AGENTIC_BG> "
+send -- "$env(AGENTICMODE_EXPECT_BIN) current --no-codex --no-processes --no-activities --pid $env(AGENTICMODE_EXPECT_PID) --poll 300 &\r"
+expect "AGENTIC_BG> "
+set active 0
+for {set attempt 0} {$attempt < 80} {incr attempt} {
+  set handle [open $env(AGENTICMODE_EXPECT_PMSET_STATE) r]
+  set value [string trim [read $handle]]
+  close $handle
+  if {$value eq "1"} { set active 1; break }
+  after 100
+}
+if {!$active} { exit 2 }
+send -- "$env(AGENTICMODE_EXPECT_BIN) off\r"
+expect {
+  "Agenticmode override is off." {}
+  timeout { exit 3 }
+}
+send -- "exit\r"
+expect eof
+exit 0
+EXPECT_BACKGROUND_CURRENT
+background_current_status=$?
+set -e
+kill -TERM "$child_pid" 2>/dev/null || true
+wait "$child_pid" 2>/dev/null || true
+child_pid=""
+[ "$background_current_status" -eq 0 ] || dump_logs
+assert_equals 0 "$background_current_status"
+wait_for_value 0 "$pmset_state"
+assert_not_contains $'\033[?1049h' "$test_root/background-current.log"
+
 printf 'Test: cleanup preserves an existing SleepDisabled baseline\n'
 printf '1\n' > "$pmset_state"
 "$repo_dir/bin/agenticmode" > "$test_root/baseline.log" 2>&1 &
