@@ -4,8 +4,8 @@
 class Agenticmode < Formula
   desc "Keep a Mac awake with its lid closed while agent runs finish"
   homepage "https://github.com/ariakalantari/agenticmode"
-  url "https://github.com/ariakalantari/agenticmode/releases/download/v1.4.0/agenticmode.tar.gz"
-  sha256 "451a397f123bf916299ae739c501e56331f92a0ea8e3dd2f8c46571d54ac52d3"
+  url "https://github.com/ariakalantari/agenticmode/releases/download/v1.4.1/agenticmode.tar.gz"
+  sha256 "e90bd0012dfbb4b004e92ec5650c2be339743f460aad6a5878b6d06c07d779de"
   license "MIT"
 
   head do
@@ -16,8 +16,8 @@ class Agenticmode < Formula
   depends_on :macos
 
   resource "ui" do
-    url "https://github.com/ariakalantari/agenticmode/releases/download/v1.4.0/agenticmode-ui"
-    sha256 "3e8bcc87b45d18670b121853c39399b2ef832dbc80853cb7810dffa190a28aaf"
+    url "https://github.com/ariakalantari/agenticmode/releases/download/v1.4.1/agenticmode-ui"
+    sha256 "ba5dc191bf72eda0f06f4bf826793646ac57f9c37564f6ce8a60e7e15cc19697"
   end
 
   def install
@@ -46,8 +46,8 @@ class Agenticmode < Formula
   end
 
   test do
-    assert_equal "agenticmode 1.4.0", shell_output("#{bin}/agenticmode --version").strip
-    assert_equal "agenticmode 1.4.0", shell_output("#{bin}/am --version").strip
+    assert_equal "agenticmode 1.4.1", shell_output("#{bin}/agenticmode --version").strip
+    assert_equal "agenticmode 1.4.1", shell_output("#{bin}/am --version").strip
     assert_match(/^  agenticmode \[options\]$/, shell_output("#{bin}/agenticmode --help"))
     assert_predicate libexec/"agenticmode-ui", :executable?
     assert_equal "1", shell_output("#{libexec}/agenticmode-ui --protocol-version").strip
