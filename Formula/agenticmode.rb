@@ -9,9 +9,13 @@ class Agenticmode < Formula
   license "MIT"
   head "https://github.com/ariakalantari/agenticmode.git", branch: "main"
 
+  depends_on "go" => :build
   depends_on :macos
 
   def install
+    if build.head?
+      system "go", "build", *std_go_args(output: libexec/"agenticmode-ui", ldflags: "-s -w"), "./cmd/agenticmode-ui"
+    end
     bin.install "bin/agenticmode"
     bin.install_symlink bin/"agenticmode" => "am"
     libexec.install "libexec/agenticmode-watchdog"
@@ -32,5 +36,9 @@ class Agenticmode < Formula
     assert_equal "agenticmode 1.3.2", shell_output("#{bin}/agenticmode --version").strip
     assert_equal "agenticmode 1.3.2", shell_output("#{bin}/am --version").strip
     assert_match(/^  agenticmode \[options\]$/, shell_output("#{bin}/agenticmode --help"))
+    if build.head?
+      assert_predicate libexec/"agenticmode-ui", :executable?
+      assert_equal "1", shell_output("#{libexec}/agenticmode-ui --protocol-version").strip
+    end
   end
 end

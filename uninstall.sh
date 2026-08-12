@@ -75,6 +75,7 @@ if [ -f "$remote_marker" ] && [ ! -L "$remote_marker" ]; then
           ;;
       esac
       rm -f "$script_dir/bin/agenticmode" "$script_dir/libexec/agenticmode-watchdog" \
+        "$script_dir/libexec/agenticmode-ui" \
         "$script_dir/config.example" "$remote_marker" "$script_dir/install.sh" "$script_dir/uninstall.sh"
       rmdir "$script_dir/bin" "$script_dir/libexec" "$script_dir" 2>/dev/null || true
       printf 'Removed managed install at %s\n' "$script_dir"

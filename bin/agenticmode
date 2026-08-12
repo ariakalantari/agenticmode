@@ -2,7 +2,7 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.3.2"
+readonly AGENTICMODE_VERSION="1.4.0"
 readonly AGENTICMODE_NAME="agenticmode"
 readonly AGENTICMODE_FORMULA="ariakalantari/agenticmode/agenticmode"
 readonly AGENTICMODE_RELEASE_BASE_URL="https://github.com/ariakalantari/agenticmode/releases"
@@ -72,6 +72,9 @@ agentic_extra_pids=""
 agentic_extra_process_names=""
 agentic_command="indefinite"
 agentic_command_args=()
+agentic_menu_requested=0
+agentic_menu_temporary=""
+agentic_menu_helper_pid=""
 
 agentic_state_root="${AGENTICMODE_STATE_DIR:-$HOME/Library/Caches/agenticmode}"
 agentic_lock_dir="${agentic_state_root}/controller.lock"
@@ -178,6 +181,13 @@ fi
 usage() {
   cat <<'USAGE'
 Usage:
+  agenticmode
+  agenticmode menu
+      Open the interactive launcher. No power setting changes until Start is confirmed.
+
+  agenticmode start [options]
+      Keep this Mac awake until Ctrl+C or `agenticmode off`.
+
   agenticmode [options]
       Keep this Mac awake until Ctrl+C or `agenticmode off`.
 
@@ -462,6 +472,7 @@ fail() {
     printf '  %b%-7s%b %s\n' "$agentic_stderr_red" "ERROR" "$agentic_stderr_reset" "$*" >&2
   fi
   [ "$agentic_cleanup_active" -eq 0 ] || terminal_restore_interrupts
+  cleanup_menu_temporary
   exit 1
 }
 
@@ -614,6 +625,15 @@ add_process_name() {
 
 parse_cli() {
   case "${1:-}" in
+    menu)
+      agentic_command="menu"
+      agentic_menu_requested=1
+      shift
+      ;;
+    start)
+      agentic_command="indefinite"
+      shift
+      ;;
     current|run|wait|detect|status|doctor|config|off)
       agentic_command="$1"
       shift
@@ -1811,6 +1831,12 @@ terminal_ui_start() {
   fi
   agentic_ui_animation_step=0
   agentic_ui_next_animation_clock=$((SECONDS + 7))
+  # The dashboard is display-only. Own terminal echo while it is visible so
+  # arrow/function keys cannot paint escape sequences over the frame; ISIG and
+  # Ctrl+C stay enabled, and the exact inherited termios is restored on exit.
+  if [ "$agentic_terminal_interrupts_owned" -eq 1 ] && [ "${AGENTICMODE_TEST_FORCE_TTY:-0}" != "1" ]; then
+    "$agentic_stty" -echo -icanon min 0 time 0 isig intr '^C' 2>/dev/null < /dev/tty || return 1
+  fi
   agentic_ui_active=1
   agentic_ui_restore_pending=1
   agentic_ui_resized=1
@@ -1829,16 +1855,26 @@ terminal_ui_start() {
   printf '%s%s%s' "$agentic_ui_smcup" "$agentic_ui_clear" "$agentic_ui_civis"
 }
 
+terminal_ui_drain_input() {
+  local discarded
+  [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_terminal_interrupts_owned" -eq 1 ] && \
+    [ "${AGENTICMODE_TEST_FORCE_TTY:-0}" != "1" ] || return 0
+  while IFS= read -r -s -n 1 -t 0.01 discarded < /dev/tty; do :; done
+}
+
 terminal_ui_restore_terminal() {
   [ "$agentic_ui_active" -eq 1 ] || return 0
+  terminal_ui_drain_input
   printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
   agentic_ui_active=0
+  terminal_restore_interrupts
 }
 
 terminal_ui_finish_restore() {
   [ "$agentic_ui_restore_pending" -eq 1 ] || return 0
   printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
   agentic_ui_restore_pending=0
+  terminal_restore_interrupts
 }
 
 terminal_ui_stop() {
@@ -1881,6 +1917,7 @@ cleanup_controller() {
     if ! stop_watchdog; then
       terminal_ui_finish_restore
       warn "the watchdog did not confirm sleep restoration; state was retained for agenticmode off"
+      cleanup_menu_temporary
       terminal_restore_interrupts
       exit 78
     fi
@@ -1901,6 +1938,7 @@ cleanup_controller() {
     release_operation_lock || true
   fi
   [ "$agentic_owns_operation" -eq 0 ] || release_operation_lock || true
+  cleanup_menu_temporary
   terminal_restore_interrupts
   agentic_cleanup_active=0
   trap - INT TERM HUP TSTP
@@ -1951,12 +1989,14 @@ controller_pause() {
   if [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_ui_resized" -eq 1 ]; then
     return 1
   fi
+  terminal_ui_drain_input
   "$agentic_sleep" "$duration" &
   agentic_timer_pid=$!
   if [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_ui_resized" -eq 1 ]; then
     wake_controller_timer
   fi
   wait "$agentic_timer_pid" 2>/dev/null || wait_status=$?
+  terminal_ui_drain_input
   if kill -0 "$agentic_timer_pid" 2>/dev/null; then
     kill -TERM "$agentic_timer_pid" 2>/dev/null || true
     wait "$agentic_timer_pid" 2>/dev/null || true
@@ -2688,6 +2728,309 @@ make_target_snapshot() {
   LC_ALL=C sort -u "$destination" -o "$destination" || fail "could not finalize the target snapshot"
 }
 
+cleanup_menu_temporary() {
+  [ -n "$agentic_menu_temporary" ] || return 0
+  rm -f "$agentic_menu_temporary/request" "$agentic_menu_temporary/response" \
+    "$agentic_menu_temporary/targets" "$agentic_menu_temporary/snapshot" "$agentic_menu_temporary/selected"
+  rmdir "$agentic_menu_temporary" 2>/dev/null || true
+  agentic_menu_temporary=""
+}
+
+cleanup_menu_session() {
+  if [ -n "$agentic_menu_helper_pid" ]; then
+    kill -TERM "$agentic_menu_helper_pid" 2>/dev/null || true
+    wait "$agentic_menu_helper_pid" 2>/dev/null || true
+    agentic_menu_helper_pid=""
+  fi
+  terminal_restore_interrupts
+  cleanup_menu_temporary
+}
+
+handle_menu_signal() {
+  local code="$1"
+  trap '' EXIT INT TERM HUP
+  cleanup_menu_session
+  exit "$code"
+}
+
+menu_helper_path() {
+  local resolved="$0" link attempts=0 source_dir candidate
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_UI_BIN:-}" ]; then
+    [ -f "$AGENTICMODE_UI_BIN" ] && [ -x "$AGENTICMODE_UI_BIN" ] && [ ! -L "$AGENTICMODE_UI_BIN" ] || return 1
+    printf '%s\n' "$AGENTICMODE_UI_BIN"
+    return 0
+  fi
+  while [ -L "$resolved" ] && [ "$attempts" -lt 10 ]; do
+    link=$(/usr/bin/readlink "$resolved") || return 1
+    case "$link" in /*) resolved="$link" ;; *) resolved="$(dirname "$resolved")/$link" ;; esac
+    attempts=$((attempts + 1))
+  done
+  source_dir=$(CDPATH= cd -- "$(dirname -- "$resolved")" && pwd) || return 1
+  for candidate in "$source_dir/../libexec/agenticmode-ui" "$source_dir/../build/agenticmode-ui"; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+menu_helper_is_compatible() {
+  local helper="${1:-}" protocol version
+  [ -n "$helper" ] || helper=$(menu_helper_path 2>/dev/null) || return 1
+  protocol=$("$helper" --protocol-version 2>/dev/null) || return 1
+  [ "$protocol" = "1" ] || return 1
+  version=$("$helper" --version 2>/dev/null) || return 1
+  [ "$version" = "agenticmode-ui $AGENTICMODE_VERSION" ]
+}
+
+menu_system_state() {
+  local sleep_state
+  if controller_identity_matches; then printf 'active\n'; return; fi
+  sleep_state=$(sleep_disabled_value 2>/dev/null || printf 'unknown')
+  if [ "$sleep_state" = "1" ] || [ -d "$agentic_lock_dir" ] || [ -r "$agentic_watchdog_pid_file" ] || [ -r "$agentic_baseline_file" ]; then
+    printf 'recovery\n'
+  else
+    printf 'inactive\n'
+  fi
+}
+
+menu_candidate_fields() {
+  local kind="$1" first="$2" second="$3" third="$4" fourth="$5" fifth="$6" decoded label
+  case "$kind" in
+    codex)
+      decoded=$(decode_path "$second")
+      agentic_menu_candidate_title=$(codex_session_title_for_path "$decoded" 2>/dev/null || printf 'Codex session')
+      agentic_menu_candidate_detail="Codex lifecycle turn"
+      ;;
+    process)
+      agentic_menu_candidate_title="${third:-Process $first}"
+      agentic_menu_candidate_detail="Exact process PID $first"
+      ;;
+    activity)
+      case "$first" in opencode) label="OpenCode" ;; *) label="$first" ;; esac
+      agentic_menu_candidate_title="$label activity $second"
+      agentic_menu_candidate_detail="Published lifecycle activity"
+      ;;
+    *) return 1 ;;
+  esac
+  terminal_ui_sanitize_text "$agentic_menu_candidate_title"
+  agentic_menu_candidate_title="${agentic_ui_sanitized:0:4096}"
+  terminal_ui_sanitize_text "$agentic_menu_candidate_detail"
+  agentic_menu_candidate_detail="$agentic_ui_sanitized"
+}
+
+write_menu_request() {
+  local request="$1" mapping="$2" snapshot="$3" system source percent kind first second third fourth fifth handle title detail count=0
+  system=$(menu_system_state)
+  source=$(power_source_kind)
+  percent=$(battery_percent)
+  case "$source" in adapter|battery) ;; *) source=unknown ;; esac
+  case "$percent" in
+    ''|*[!0-9]*) source=unknown; percent=unknown ;;
+    *) [ "$percent" -le 100 ] || { source=unknown; percent=unknown; } ;;
+  esac
+  {
+    printf 'agenticmode-menu-v1\n'
+    printf 'generation|1\n'
+    printf 'system|%s\n' "$system"
+    printf 'power|%s|%s\n' "$source" "$percent"
+    printf 'defaults|current-all|%s|%s|%s\n' "$agentic_timeout_seconds" "$agentic_min_battery" "$agentic_poll_seconds"
+    while IFS='|' read -r kind first second third fourth fifth; do
+      [ -n "$kind" ] || continue
+      count=$((count + 1))
+      [ "$count" -le 1000 ] || return 1
+      printf -v handle 't%04d' "$count"
+      menu_candidate_fields "$kind" "$first" "$second" "$third" "$fourth" "$fifth" || return 1
+      title=$(encode_path "$agentic_menu_candidate_title")
+      detail=$(encode_path "$agentic_menu_candidate_detail")
+      printf 'candidate|%s|%s|%s|%s\n' "$handle" "$kind" "$title" "$detail"
+      printf '%s|%s|%s|%s|%s|%s|%s\n' "$handle" "$kind" "$first" "$second" "$third" "$fourth" "$fifth" >> "$mapping" || return 1
+    done < "$snapshot"
+    printf 'end\n'
+  } > "$request" || return 1
+  [ "$("$agentic_stat" -f '%z' "$request" 2>/dev/null || printf '1048577')" -le 1048576 ]
+}
+
+menu_handle_exists() {
+  local handle="$1" mapping="$2"
+  "$agentic_awk" -F '|' -v wanted="$handle" '$1 == wanted { found++ } END { exit found == 1 ? 0 : 1 }' "$mapping"
+}
+
+parse_menu_response() {
+  local response="$1" mapping="$2" line key first second extra mode group_digit other_digit header=0 generation=0 action=0 completion=0 timeout=0 battery=0 ended=0
+  agentic_menu_action=""; agentic_menu_completion=""; agentic_menu_timeout="$agentic_timeout_seconds"; agentic_menu_battery="$agentic_min_battery"; agentic_menu_targets=""
+  [ -f "$response" ] && [ ! -L "$response" ] || return 1
+  [ "$("$agentic_stat" -f '%u' "$response" 2>/dev/null || printf invalid)" = "$UID" ] || return 1
+  mode=$("$agentic_stat" -f '%Lp' "$response" 2>/dev/null) || return 1
+  group_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\).$/\1/')
+  other_digit=$(printf '%s\n' "$mode" | "$agentic_sed" 's/.*\(.\)$/\1/')
+  case "$group_digit$other_digit" in *[1234567]*) return 1 ;; esac
+  [ "$("$agentic_stat" -f '%z' "$response" 2>/dev/null || printf 65537)" -le 65536 ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$ended" -eq 0 ] || return 1
+    if [ "$header" -eq 0 ]; then [ "$line" = "agenticmode-choice-v1" ] || return 1; header=1; continue; fi
+    IFS='|' read -r key first second extra <<EOF
+$line
+EOF
+    [ -z "$extra" ] || return 1
+    case "$key" in
+      generation) [ "$generation" -eq 0 ] && [ "$first" = "1" ] && [ -z "$second" ] || return 1; generation=1 ;;
+      action)
+        [ "$action" -eq 0 ] && [ -z "$second" ] || return 1
+        case "$first" in start|status|stop|detect|doctor|config|update|help|quit|cancel) ;; *) return 1 ;; esac
+        agentic_menu_action="$first"; action=1
+        ;;
+      completion)
+        [ "$completion" -eq 0 ] && [ -z "$second" ] || return 1
+        case "$first" in current-all|current-selected|manual|timer|process-selected) ;; *) return 1 ;; esac
+        agentic_menu_completion="$first"; completion=1
+        ;;
+      target)
+        [ -z "$second" ] || return 1
+        case "$first" in t[0-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
+        menu_handle_exists "$first" "$mapping" || return 1
+        case ",${agentic_menu_targets}," in *",$first,"*) return 1 ;; esac
+        if [ -z "$agentic_menu_targets" ]; then agentic_menu_targets="$first"; else agentic_menu_targets="$agentic_menu_targets,$first"; fi
+        ;;
+      timeout-seconds)
+        [ "$timeout" -eq 0 ] && [ -z "$second" ] || return 1
+        case "$first" in ''|*[!0-9]*) return 1 ;; esac
+        case "$first" in 0|[1-9]|[1-9][0-9]*) ;; *) return 1 ;; esac
+        [ "${#first}" -le 8 ] && [ "$first" -le 31536000 ] || return 1
+        agentic_menu_timeout="$first"; timeout=1
+        ;;
+      min-battery)
+        [ "$battery" -eq 0 ] && [ -z "$second" ] || return 1
+        case "$first" in ''|*[!0-9]*) return 1 ;; esac
+        case "$first" in 0|[1-9]|[1-9][0-9]*) ;; *) return 1 ;; esac
+        [ "$first" -le 100 ] || return 1
+        agentic_menu_battery="$first"; battery=1
+        ;;
+      end) [ -z "$first" ] && [ -z "$second" ] || return 1; ended=1 ;;
+      *) return 1 ;;
+    esac
+  done < "$response"
+  [ "$header" -eq 1 ] && [ "$generation" -eq 1 ] && [ "$action" -eq 1 ] && [ "$ended" -eq 1 ] || return 1
+  if [ "$agentic_menu_action" = "start" ]; then
+    [ "$completion" -eq 1 ] && [ "$timeout" -eq 1 ] && [ "$battery" -eq 1 ] || return 1
+    case "$agentic_menu_completion" in
+      current-selected|process-selected) [ -n "$agentic_menu_targets" ] || return 1 ;;
+      timer) [ "$timeout" -eq 1 ] && [ "$agentic_menu_timeout" -gt 0 ] || return 1; [ -z "$agentic_menu_targets" ] || return 1 ;;
+      current-all|manual) [ -z "$agentic_menu_targets" ] || return 1 ;;
+    esac
+  else
+    [ "$completion" -eq 0 ] && [ "$timeout" -eq 0 ] && [ "$battery" -eq 0 ] && [ -z "$agentic_menu_targets" ] || return 1
+  fi
+}
+
+run_selected_menu_targets() {
+  local mapping="$1" handles="$2" completion="$3" snapshot handle record kind first second third fourth fifth total old_ifs
+  snapshot="${mapping%/*}/selected"
+  validate_host
+  validate_state_root
+  (set -C; : > "$snapshot") 2>/dev/null || fail "could not prepare the selected target snapshot"
+  chmod 600 "$snapshot" || fail "could not secure the selected target snapshot"
+  old_ifs=$IFS
+  while IFS= read -r handle; do
+    [ -n "$handle" ] || continue
+    record=$("$agentic_awk" -F '|' -v wanted="$handle" '$1 == wanted { sub(/^[^|]*\|/, ""); print }' "$mapping")
+    IFS='|' read -r kind first second third fourth fifth <<EOF
+$record
+EOF
+    if [ "$completion" = "process-selected" ] && [ "$kind" != "process" ]; then rm -f "$snapshot"; fail "the launcher selected a non-process target for process mode"; fi
+    [ "$(target_state "$kind" "$first" "$second" "$third" "$fourth" "$fifth")" = "working" ] || continue
+    printf '%s\n' "$record" >> "$snapshot"
+  done < <(printf '%s\n' "$handles" | "$agentic_tr" ',' '\n')
+  IFS=$old_ifs
+  LC_ALL=C sort -u "$snapshot" -o "$snapshot" || { rm -f "$snapshot"; fail "could not finalize selected targets"; }
+  total=$(target_count "$snapshot")
+  if [ "$total" -eq 0 ]; then rm -f "$snapshot"; status_info "The selected work finished before the sleep override started. Power settings were not changed."; return 0; fi
+  start_controller "current"
+  agentic_ui_total="$total"; agentic_ui_remaining="$total"
+  mv "$snapshot" "$agentic_targets_file"
+  agentic_finished_targets=""
+  terminal_ui_start "current" || true
+  status_info "Tracking $total selected agent run(s)."
+  show_targets_file "$agentic_targets_file" "working" 0
+  show_target_progress "$total" "$total"
+  wait_for_targets
+}
+
+dispatch_menu_choice() {
+  local mapping="$1" all_handles source percent system
+  case "$agentic_menu_action" in
+    quit|cancel) return 0 ;;
+    status) show_status ;;
+    stop) turn_off ;;
+    detect) run_detect ;;
+    doctor) run_doctor ;;
+    config) show_effective_config ;;
+    update) run_update ;;
+    help) usage ;;
+    start)
+      system=$(menu_system_state)
+      [ "$system" = "inactive" ] || fail "agentic mode became active or needs recovery while the launcher was open; no power settings were changed"
+      agentic_timeout_seconds="$agentic_menu_timeout"
+      agentic_timeout="$agentic_menu_timeout"
+      agentic_min_battery="$agentic_menu_battery"
+      if [ "$agentic_min_battery" -gt 0 ]; then
+        source=$(power_source_kind)
+        [ "$source" != "unknown" ] || fail "battery state became unavailable while the launcher was open; no power settings were changed"
+        if [ "$source" = "battery" ]; then
+          percent=$(battery_percent)
+          case "$percent" in ''|*[!0-9]*) fail "battery percentage became unavailable while the launcher was open; no power settings were changed" ;; esac
+          [ "$percent" -gt "$agentic_min_battery" ] || fail "battery is already at or below the selected floor; no power settings were changed"
+        fi
+      fi
+      case "$agentic_menu_completion" in
+        current-all)
+          all_handles=$("$agentic_awk" -F '|' 'NF { if (handles == "") handles=$1; else handles=handles "," $1 } END { print handles }' "$mapping")
+          run_selected_menu_targets "$mapping" "$all_handles" "current-selected"
+          ;;
+        current-selected|process-selected) run_selected_menu_targets "$mapping" "$agentic_menu_targets" "$agentic_menu_completion" ;;
+        manual|timer) run_indefinitely ;;
+      esac
+      ;;
+  esac
+}
+
+run_menu() {
+  local helper temporary request response mapping snapshot helper_status=0
+  terminal_stream_is_interactive 0 && terminal_stream_is_interactive 1 && terminal_process_owns_foreground || \
+    fail "the interactive launcher requires a foreground terminal; use agenticmode start or an explicit command"
+  helper=$(menu_helper_path) || fail "the interactive launcher helper is missing; reinstall agenticmode or use agenticmode start"
+  menu_helper_is_compatible "$helper" || fail "the interactive launcher does not match the CLI; reinstall agenticmode"
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/agenticmode-menu.XXXXXX") || fail "could not create launcher state"
+  agentic_menu_temporary="$temporary"
+  trap cleanup_menu_session EXIT
+  trap 'handle_menu_signal 143' TERM
+  trap 'handle_menu_signal 129' HUP
+  chmod 700 "$temporary" || { rmdir "$temporary"; fail "could not secure launcher state"; }
+  request="$temporary/request"; response="$temporary/response"; mapping="$temporary/targets"; snapshot="$temporary/snapshot"
+  umask 077
+  : > "$mapping"
+  make_target_snapshot "$snapshot"
+  if ! write_menu_request "$request" "$mapping" "$snapshot"; then fail "the launcher request was too large or invalid"; fi
+  chmod 600 "$request" "$mapping" "$snapshot" || fail "could not secure launcher state"
+  terminal_prepare_interrupts
+  "$helper" menu "$request" "$response" &
+  agentic_menu_helper_pid=$!
+  wait "$agentic_menu_helper_pid" || helper_status=$?
+  agentic_menu_helper_pid=""
+  terminal_restore_interrupts
+  if [ "$helper_status" -ne 0 ]; then fail "the interactive launcher exited unexpectedly; no power settings were changed"; fi
+  if ! parse_menu_response "$response" "$mapping"; then fail "the interactive launcher returned an invalid choice; no power settings were changed"; fi
+  # Retire menu-scoped traps before dispatch. A start action installs the
+  # controller's stronger safety traps, which must remain active through exit.
+  terminal_restore_interrupts
+  trap - EXIT INT TERM HUP
+  dispatch_menu_choice "$mapping"
+  helper_status=$?
+  cleanup_menu_session
+  return "$helper_status"
+}
+
 run_indefinitely() {
   agentic_ui_total=0
   agentic_ui_remaining=0
@@ -3075,6 +3418,12 @@ load_managed_install() {
     owner=$("$agentic_stat" -f '%u' "$path" 2>/dev/null) || fail "cannot inspect managed install file: $path"
     [ "$owner" = "$UID" ] || fail "managed install file must be owned by your user: $path"
   done
+  path="$root/libexec/agenticmode-ui"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ -x "$path" ] && [ ! -L "$path" ] || fail "managed launcher helper is unsafe: $path"
+    owner=$("$agentic_stat" -f '%u' "$path" 2>/dev/null) || fail "cannot inspect managed launcher helper: $path"
+    [ "$owner" = "$UID" ] || fail "managed launcher helper must be owned by your user: $path"
+  fi
   for target in "$prefix/bin/agenticmode" "$prefix/bin/am"; do
     if [ -e "$target" ] || [ -L "$target" ]; then
       [ -L "$target" ] || fail "refusing to replace non-symlink command: $target"
@@ -3115,7 +3464,7 @@ run_homebrew_update() {
 }
 
 validate_release_archive() {
-  local archive="$1" extract_root="$2" listing="$3" entry path
+  local archive="$1" extract_root="$2" listing="$3" entry path new_version_output new_version
   "$agentic_tar" -tzf "$archive" > "$listing" || fail "the release archive could not be inspected"
   while IFS= read -r entry; do
     case "$entry" in
@@ -3129,6 +3478,9 @@ validate_release_archive() {
   for path in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
     [ -f "$extract_root/agenticmode/$path" ] && [ ! -L "$extract_root/agenticmode/$path" ] || fail "the release archive is missing a safe $path"
   done
+  [ -x "$extract_root/agenticmode/bin/agenticmode" ] && \
+    [ -x "$extract_root/agenticmode/libexec/agenticmode-watchdog" ] || \
+    fail "the release archive contains a non-executable runtime component"
   /bin/bash -n "$extract_root/agenticmode/install.sh" "$extract_root/agenticmode/uninstall.sh" \
     "$extract_root/agenticmode/bin/agenticmode" "$extract_root/agenticmode/libexec/agenticmode-watchdog" || \
     fail "the release archive failed shell syntax validation"
@@ -3136,8 +3488,12 @@ validate_release_archive() {
 
 restore_managed_files() {
   local root="$1" backup="$2" relative destination temporary mode failed=0
-  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog libexec/agenticmode-ui; do
     destination="$root/$relative"
+    if [ "$relative" = "libexec/agenticmode-ui" ] && [ -e "$backup/ui-absent" ]; then
+      rm -f "$destination" 2>/dev/null || failed=1
+      continue
+    fi
     temporary="${destination}.rollback.$$"
     case "$relative" in config.example) mode=644 ;; *) mode=755 ;; esac
     if ! /usr/bin/install -m "$mode" "$backup/$relative" "$temporary" 2>/dev/null; then
@@ -3158,7 +3514,7 @@ cleanup_update_temporary() {
 
 run_managed_update() {
   local release_base temporary archive checksum_file checksum actual_checksum extract_root staged backup
-  local new_version_output new_version relative destination replacement mode rollback_message
+  local new_version_output new_version relative destination replacement mode rollback_message ui_archive ui_checksum_file ui_checksum ui_actual_checksum
   case "$agentic_managed_channel" in
     stable) ;;
     pinned:*) fail "this direct install is pinned to ${agentic_managed_channel#pinned:}; reinstall without AGENTICMODE_INSTALL_REF to follow stable releases" ;;
@@ -3193,6 +3549,24 @@ run_managed_update() {
   staged="$extract_root/agenticmode"
   new_version_output=$("$staged/bin/agenticmode" --version 2>/dev/null) || { rm -rf "$temporary"; fail "the release CLI could not report its version"; }
   case "$new_version_output" in "agenticmode "*) new_version=${new_version_output#agenticmode } ;; *) rm -rf "$temporary"; fail "the release CLI reported an invalid version" ;; esac
+  ui_archive="$temporary/agenticmode-ui"
+  ui_checksum_file="$temporary/agenticmode-ui.sha256"
+  if [[ "$release_base" == file://* ]]; then
+    /bin/cp "${release_base#file://}/latest/download/agenticmode-ui" "$ui_archive" || { rm -rf "$temporary"; fail "could not load the release launcher"; }
+    /bin/cp "${release_base#file://}/latest/download/agenticmode-ui.sha256" "$ui_checksum_file" || { rm -rf "$temporary"; fail "could not load the release launcher checksum"; }
+  else
+    "$agentic_curl" -fsSL --proto '=https' --tlsv1.2 "$release_base/latest/download/agenticmode-ui" -o "$ui_archive" || { rm -rf "$temporary"; fail "could not download the release launcher"; }
+    "$agentic_curl" -fsSL --proto '=https' --tlsv1.2 "$release_base/latest/download/agenticmode-ui.sha256" -o "$ui_checksum_file" || { rm -rf "$temporary"; fail "could not download the release launcher checksum"; }
+  fi
+  ui_checksum=$("$agentic_awk" 'NR == 1 { print $1 } END { if (NR != 1 || NF != 2 || $2 != "agenticmode-ui") exit 1 }' "$ui_checksum_file") || { rm -rf "$temporary"; fail "the release launcher checksum file is malformed"; }
+  [ "${#ui_checksum}" -eq 64 ] || { rm -rf "$temporary"; fail "the release launcher checksum is malformed"; }
+  case "$ui_checksum" in *[!A-Fa-f0-9]*) rm -rf "$temporary"; fail "the release launcher checksum is malformed" ;; esac
+  ui_actual_checksum=$("$agentic_shasum" -a 256 "$ui_archive" | "$agentic_awk" '{ print $1 }') || { rm -rf "$temporary"; fail "could not checksum the release launcher"; }
+  [ "$ui_actual_checksum" = "$ui_checksum" ] || { rm -rf "$temporary"; fail "the release launcher checksum did not match"; }
+  chmod 755 "$ui_archive" || { rm -rf "$temporary"; fail "could not secure the release launcher"; }
+  [ "$("$ui_archive" --protocol-version 2>/dev/null)" = "1" ] && [ "$("$ui_archive" --version 2>/dev/null)" = "agenticmode-ui $new_version" ] || { rm -rf "$temporary"; fail "the release launcher is incompatible with the release CLI"; }
+  /bin/cp "$ui_archive" "$staged/libexec/agenticmode-ui" || { rm -rf "$temporary"; fail "could not stage the release launcher"; }
+  chmod 755 "$staged/libexec/agenticmode-ui"
   if version_is_newer "$new_version" "$AGENTICMODE_VERSION"; then
     :
   else
@@ -3217,7 +3591,12 @@ run_managed_update() {
   for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
     /bin/cp -p "$agentic_managed_root/$relative" "$backup/$relative" || { rm -rf "$temporary"; fail "could not back up the current managed install"; }
   done
-  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog; do
+  if [ -f "$agentic_managed_root/libexec/agenticmode-ui" ] && [ ! -L "$agentic_managed_root/libexec/agenticmode-ui" ]; then
+    /bin/cp -p "$agentic_managed_root/libexec/agenticmode-ui" "$backup/libexec/agenticmode-ui" || { rm -rf "$temporary"; fail "could not back up the current launcher helper"; }
+  else
+    : > "$backup/ui-absent"
+  fi
+  for relative in install.sh uninstall.sh config.example bin/agenticmode libexec/agenticmode-watchdog libexec/agenticmode-ui; do
     destination="$agentic_managed_root/$relative"
     replacement="${destination}.update.$$"
     if [ -e "$replacement" ] || [ -L "$replacement" ]; then
@@ -3290,6 +3669,7 @@ run_doctor() {
 }
 
 main() {
+  local original_count="$#"
   case "${1:-}" in
     help|-h|--help) usage; exit 0 ;;
     version|-v|--version) say "$AGENTICMODE_NAME $AGENTICMODE_VERSION"; exit 0 ;;
@@ -3306,10 +3686,15 @@ main() {
   fi
   find_config_argument "$@"
   case "${1:-}" in off|status) ;; *) load_config ;; esac
+  if [ "$original_count" -eq 0 ]; then
+    agentic_command="menu"
+    agentic_menu_requested=1
+  fi
   parse_cli "$@"
   validate_configuration
 
   case "$agentic_command" in
+    menu) run_menu ;;
     indefinite) run_indefinitely ;;
     current) run_current ;;
     wait) run_wait ;;

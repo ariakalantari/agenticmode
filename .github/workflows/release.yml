@@ -12,6 +12,21 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify Go module
+        run: |
+          go mod verify
+          go test ./...
+          go test -race ./...
+          go vet ./...
+      - name: Run integration tests
+        run: |
+          ./tests/test_menu.sh
+          ./tests/test_agenticmode.sh
+          ./tests/test_packaging.sh
       - name: Package release
         run: ./scripts/package-release.sh "$GITHUB_REF_NAME" dist
       - name: Publish release
@@ -21,6 +36,8 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/agenticmode.tar.gz \
             dist/agenticmode.tar.gz.sha256 \
+            dist/agenticmode-ui \
+            dist/agenticmode-ui.sha256 \
             --generate-notes \
             --title "$GITHUB_REF_NAME" \
             --verify-tag
