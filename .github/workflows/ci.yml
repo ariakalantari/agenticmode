@@ -38,6 +38,8 @@ jobs:
           brew style Formula/agenticmode.rb
           brew tap-new --no-git agenticmode/local
           cp Formula/agenticmode.rb "$(brew --repository agenticmode/local)/Formula/agenticmode.rb"
+          ! brew deps --direct --include-build agenticmode/local/agenticmode | grep -qx go
+          brew deps --HEAD --direct --include-build agenticmode/local/agenticmode | grep -qx go
           brew audit --strict agenticmode/local/agenticmode
           brew install --build-from-source agenticmode/local/agenticmode
           brew test agenticmode/local/agenticmode

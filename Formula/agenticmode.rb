@@ -7,9 +7,12 @@ class Agenticmode < Formula
   url "https://github.com/ariakalantari/agenticmode/releases/download/v1.4.0/agenticmode.tar.gz"
   sha256 "451a397f123bf916299ae739c501e56331f92a0ea8e3dd2f8c46571d54ac52d3"
   license "MIT"
-  head "https://github.com/ariakalantari/agenticmode.git", branch: "main"
 
-  depends_on "go" => :build if build.head?
+  head do
+    url "https://github.com/ariakalantari/agenticmode.git", branch: "main"
+    depends_on "go" => :build
+  end
+
   depends_on :macos
 
   resource "ui" do
