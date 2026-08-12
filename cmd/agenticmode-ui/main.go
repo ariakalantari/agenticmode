@@ -51,7 +51,7 @@ func run(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		model := ui.NewModel(request).SkipSplash()
+		model := ui.NewModel(request)
 		model, _ = resizeModel(model, width, height)
 		_, err = io.WriteString(stdout, model.Render())
 		return err

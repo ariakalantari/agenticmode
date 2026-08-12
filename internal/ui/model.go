@@ -14,8 +14,7 @@ import (
 type screen int
 
 const (
-	screenSplash screen = iota
-	screenMain
+	screenMain screen = iota
 	screenCurrent
 	screenCurrentSelect
 	screenProcessSelect
@@ -70,13 +69,9 @@ type Model struct {
 
 func NewModel(request protocol.Request) Model {
 	reduced := os.Getenv("AGENTICMODE_REDUCED_MOTION") == "1"
-	initial := screenSplash
-	if reduced {
-		initial = screenMain
-	}
 	return Model{
 		request:       request,
-		screen:        initial,
+		screen:        screenMain,
 		cursors:       make(map[screen]int),
 		selected:      make(map[string]bool),
 		completion:    request.Defaults.Completion,
@@ -89,17 +84,8 @@ func NewModel(request protocol.Request) Model {
 	}
 }
 
-// SkipSplash returns a model positioned at the first interactive screen. It is
-// used by deterministic render tests and other non-interactive previews.
-func (m Model) SkipSplash() Model {
-	if m.screen == screenSplash {
-		m.screen = screenMain
-	}
-	return m
-}
-
 func (m Model) Init() tea.Cmd {
-	if m.screen == screenSplash {
+	if !m.reducedMotion && m.frame < 8 {
 		return tickAfter()
 	}
 	return nil
@@ -122,21 +108,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 	case tickMsg:
-		if m.screen != screenSplash {
-			return m, nil
-		}
 		m.frame++
 		if m.frame >= 8 {
-			m.screen = screenMain
 			return m, nil
 		}
 		return m, tickAfter()
 	case tea.KeyPressMsg:
 		key := msg.Keystroke()
-		if m.screen == screenSplash {
-			m.screen = screenMain
-			return m, nil // the skip key is deliberately discarded
-		}
 		if key == "ctrl+c" {
 			m.finish(protocol.Choice{Generation: m.request.Generation, Action: "cancel"})
 			return m, tea.Quit
@@ -492,44 +470,44 @@ func (m Model) options() []option {
 	case screenMain:
 		switch m.request.System {
 		case protocol.SystemActive:
-			return []option{{"status", "View status", "Inspect the active controller and watchdog.", false}, {"stop", "Stop and restore sleep", "End the active awake lease safely.", false}, {"utilities", "Utilities", "Doctor, configuration, update, and help.", false}, {"quit", "Exit", "Leave the active lease unchanged.", false}}
+			return []option{{"status", "View status", "Controller health", false}, {"stop", "Stop and restore sleep", "End awake mode", false}, {"utilities", "Utilities", "Tools and settings", false}, {"quit", "Exit", "Leave it running", false}}
 		case protocol.SystemRecovery:
-			return []option{{"stop", "Restore normal sleep", "Run the existing fail-closed recovery path.", false}, {"doctor", "View diagnostics", "Inspect the inconsistent controller state.", false}, {"quit", "Exit", "Make no changes.", false}}
+			return []option{{"stop", "Restore normal sleep", "Repair sleep state", false}, {"doctor", "View diagnostics", "Inspect the issue", false}, {"quit", "Exit", "Make no changes", false}}
 		default:
-			return []option{{"current", "Current agents finish", "Track all detected agents or choose exact sessions.", false}, {"manual", "I turn it off", "Keep awake until Ctrl+C or am off.", false}, {"timer", "A timer expires", "Choose a fixed awake duration.", false}, {"process", "Selected processes finish", "Track exact detected process identities.", m.processCount() == 0}, {"status", "Status", "Inspect sleep and controller health.", false}, {"utilities", "Utilities", "Detect, doctor, config, update, and help.", false}, {"quit", "Quit", "Make no power changes.", false}}
+			return []option{{"current", "Current agents finish", "Detected agents", false}, {"manual", "I turn it off", "Until turned off", false}, {"timer", "A timer expires", "Fixed duration", false}, {"process", "Selected processes finish", "Exact processes", m.processCount() == 0}, {"status", "Status", "Controller health", false}, {"utilities", "Utilities", "Tools and settings", false}, {"quit", "Quit", "No power changes", false}}
 		}
 	case screenCurrent:
-		return []option{{"current-all", fmt.Sprintf("All detected agents (%d)", len(m.request.Candidates)), "Track this immutable snapshot after Bash revalidates each target.", len(m.request.Candidates) == 0}, {"current-selected", "Choose specific agents...", "Select immutable targets from the detected snapshot.", len(m.request.Candidates) == 0}, {"back", "Back", "Return to the launcher.", false}}
+		return []option{{"current-all", fmt.Sprintf("All detected agents (%d)", len(m.request.Candidates)), "Whole snapshot", len(m.request.Candidates) == 0}, {"current-selected", "Choose specific agents...", "Pick agents", len(m.request.Candidates) == 0}, {"back", "Back", "Main menu", false}}
 	case screenCurrentSelect:
 		return m.candidateOptions(false)
 	case screenProcessSelect:
 		return m.candidateOptions(true)
 	case screenSafeguards:
-		return []option{{"battery", "Battery floor", batteryLabel(m.minBattery), false}, {"timeout", "Maximum duration", timeoutLabel(m.timeout), false}, {"start", "Start agenticmode", m.startSummary(), !m.batteryConfigValid() || (m.completion == "current-selected" || m.completion == "process-selected") && len(m.selectedHandles()) == 0}, {"back", "Back", "Change the completion condition.", false}}
+		return []option{{"battery", "Battery floor", batteryLabel(m.minBattery), false}, {"timeout", "Maximum duration", timeoutLabel(m.timeout), false}, {"start", "Start agenticmode", m.startSummary(), !m.batteryConfigValid() || (m.completion == "current-selected" || m.completion == "process-selected") && len(m.selectedHandles()) == 0}, {"back", "Back", "Completion condition", false}}
 	case screenBattery:
-		result := []option{{"battery-off", "Off", "No battery cutoff.", false}}
+		result := []option{{"battery-off", "Off", "No battery cutoff", false}}
 		for _, value := range []int{15, 20, 25, 30, 40} {
 			result = append(result, option{fmt.Sprintf("battery-%d", value), fmt.Sprintf("%d%%", value), batteryPresetDetail(m.request, value), !m.batteryPresetAllowed(value)})
 		}
-		result = append(result, option{"battery-custom", "Custom percentage...", "Enter an exact cutoff from 1 to 100%.", m.request.Power == protocol.PowerUnknown}, option{"back", "Back", "Keep the current battery floor.", false})
+		result = append(result, option{"battery-custom", "Custom percentage...", "Exact cutoff", m.request.Power == protocol.PowerUnknown}, option{"back", "Back", "Keep current floor", false})
 		return result
 	case screenTimeout:
 		result := []option{}
 		if m.completion != "timer" {
-			result = append(result, option{"timeout-off", "Off", "No maximum duration.", false})
+			result = append(result, option{"timeout-off", "Off", "No time limit", false})
 		}
 		for _, preset := range []struct {
 			seconds int
 			label   string
 		}{{1800, "30 minutes"}, {3600, "1 hour"}, {7200, "2 hours"}, {14400, "4 hours"}, {28800, "8 hours"}} {
-			result = append(result, option{fmt.Sprintf("timeout-%d", preset.seconds), preset.label, fmt.Sprintf("Stop after %s.", preset.label), false})
+			result = append(result, option{fmt.Sprintf("timeout-%d", preset.seconds), preset.label, "Stop after " + preset.label, false})
 		}
-		result = append(result, option{"timeout-custom", "Custom seconds...", "Enter 1 to 31536000 seconds.", false}, option{"back", "Back", "Keep the current duration.", false})
+		result = append(result, option{"timeout-custom", "Custom seconds...", "Exact duration", false}, option{"back", "Back", "Keep duration", false})
 		return result
 	case screenConfirm:
-		return []option{{"confirm-start", "Start indefinite mode", "Keep awake until Ctrl+C or am off.", false}, {"back", "Back", "Add a safety limit or cancel.", false}}
+		return []option{{"confirm-start", "Start indefinite mode", "Until turned off", false}, {"back", "Back", "Add a safeguard", false}}
 	case screenUtilities:
-		return []option{{"detect", "Detect current agents", "Read-only detection; no power change.", false}, {"doctor", "Doctor", "Inspect installation and runtime health.", false}, {"config", "Effective configuration", "Show the resolved backend settings.", false}, {"update", "Update", "Run the existing verified update workflow.", false}, {"help", "Command help", "Show all explicit CLI shortcuts.", false}, {"back", "Back", "Return to the launcher.", false}}
+		return []option{{"detect", "Detect current agents", "Read-only scan", false}, {"doctor", "Doctor", "Health check", false}, {"config", "Effective configuration", "Resolved settings", false}, {"update", "Update", "Verified update", false}, {"help", "Command help", "CLI shortcuts", false}, {"back", "Back", "Main menu", false}}
 	}
 	return nil
 }
@@ -542,7 +520,7 @@ func (m Model) candidateOptions(processOnly bool) []option {
 		}
 		result = append(result, option{candidate.Handle, candidate.Title, candidate.Detail, false})
 	}
-	result = append(result, option{"continue", fmt.Sprintf("Continue with %d selected", len(m.selectedHandles())), "Configure battery and time safeguards.", len(m.selectedHandles()) == 0}, option{"back", "Back", "Return without selecting targets.", false})
+	result = append(result, option{"continue", fmt.Sprintf("Continue with %d selected", len(m.selectedHandles())), "Set safeguards", len(m.selectedHandles()) == 0}, option{"back", "Back", "Keep selection", false})
 	return result
 }
 
@@ -582,37 +560,37 @@ func formatDuration(seconds int) string {
 
 func batteryPresetDetail(req protocol.Request, value int) string {
 	if req.Power == protocol.PowerUnknown {
-		return "Battery state is unavailable."
+		return "Battery unavailable"
 	}
 	if req.Power == protocol.PowerBattery && value >= req.Percent {
-		return fmt.Sprintf("Current charge is %d%%; choose a lower floor.", req.Percent)
+		return fmt.Sprintf("Below current %d%%", req.Percent)
 	}
 	if req.Power == protocol.PowerAdapter {
-		return "Activates after switching to battery power."
+		return "When on battery"
 	}
-	return fmt.Sprintf("Restore sleep at or below %d%%.", value)
+	return fmt.Sprintf("Stop at %d%%", value)
 }
 
 func (m Model) startSummary() string {
 	if !m.batteryConfigValid() {
-		return "Battery floor is unavailable; choose Off or a lower floor."
+		return "Battery unavailable"
 	}
 	var condition string
 	switch m.completion {
 	case "current-all":
-		condition = "all current agents"
+		condition = "All current agents"
 	case "current-selected", "process-selected":
-		condition = fmt.Sprintf("%d selected targets", len(m.selectedHandles()))
+		condition = fmt.Sprintf("%d selected", len(m.selectedHandles()))
 	case "timer":
-		condition = "timer"
+		condition = "Timer"
 	default:
-		condition = "manual mode"
+		condition = "Manual"
 	}
 	if m.minBattery > 0 {
-		condition += fmt.Sprintf(", %d%% battery floor", m.minBattery)
+		condition += fmt.Sprintf(" · %d%%", m.minBattery)
 	}
 	if m.timeout > 0 {
-		condition += ", " + formatDuration(m.timeout) + " maximum"
+		condition += " · " + formatDuration(m.timeout)
 	}
 	return condition
 }

@@ -27,7 +27,7 @@ func launcherRequest() protocol.Request {
 }
 
 func TestCurrentAllFlowDoesNotCommitBeforeStart(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.activate(option{id: "current"})
 	m.activate(option{id: "current-all"})
 	if m.screen != screenSafeguards {
@@ -44,7 +44,7 @@ func TestCurrentAllFlowDoesNotCommitBeforeStart(t *testing.T) {
 }
 
 func TestSelectedFlowVisitsSafeguardsAndPreservesRequestOrder(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.activate(option{id: "current"})
 	m.activate(option{id: "current-selected"})
 	m.selected["p0001"] = true
@@ -70,7 +70,7 @@ func TestTimerPresetAndCustomAdvanceToSafeguards(t *testing.T) {
 		custom  bool
 	}{{"preset", 7200, false}, {"custom", 123, true}} {
 		t.Run(test.name, func(t *testing.T) {
-			m := NewModel(launcherRequest()).SkipSplash()
+			m := NewModel(launcherRequest())
 			m.activate(option{id: "timer"})
 			if test.custom {
 				m.activate(option{id: "timeout-custom"})
@@ -92,7 +92,7 @@ func TestTimerPresetAndCustomAdvanceToSafeguards(t *testing.T) {
 }
 
 func TestManualWithoutSafeguardsRequiresConfirmation(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.activate(option{id: "manual"})
 	m.activate(option{id: "start"})
 	if m.screen != screenConfirm {
@@ -113,7 +113,7 @@ func TestInvalidConfiguredBatteryFloorBlocksStartUntilResolved(t *testing.T) {
 	request.Power = protocol.PowerUnknown
 	request.Percent = -1
 	request.Defaults.MinBattery = 25
-	m := NewModel(request).SkipSplash()
+	m := NewModel(request)
 	m.activate(option{id: "manual"})
 	start := m.options()[2]
 	if !start.disabled || !strings.Contains(start.detail, "unavailable") {
@@ -133,7 +133,7 @@ func TestInvalidConfiguredBatteryFloorBlocksStartUntilResolved(t *testing.T) {
 func TestCurrentModeIsUnavailableWithoutDetectedCandidates(t *testing.T) {
 	request := launcherRequest()
 	request.Candidates = nil
-	m := NewModel(request).SkipSplash()
+	m := NewModel(request)
 	m.activate(option{id: "current"})
 	options := m.options()
 	if !options[0].disabled || !options[1].disabled {
@@ -142,7 +142,7 @@ func TestCurrentModeIsUnavailableWithoutDetectedCandidates(t *testing.T) {
 }
 
 func TestQuitKeyOnlyExitsAtRoot(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.push(screenHelp)
 	m.updateMenu("q")
 	if _, ok := m.Choice(); ok {
@@ -156,9 +156,20 @@ func TestQuitKeyOnlyExitsAtRoot(t *testing.T) {
 	}
 }
 
+func TestLauncherIsInteractiveOnFirstFrame(t *testing.T) {
+	m := NewModel(launcherRequest())
+	if m.screen != screenMain {
+		t.Fatalf("initial screen = %v, want main menu", m.screen)
+	}
+	m.updateMenu("down")
+	if m.cursor() != 1 {
+		t.Fatalf("first key did not move the menu cursor: %d", m.cursor())
+	}
+}
+
 func TestRenderRespectsTerminalGeometry(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{20, 5}, {80, 20}, {120, 30}, {200, 60}} {
-		m := NewModel(launcherRequest()).SkipSplash()
+		m := NewModel(launcherRequest())
 		m.width, m.height = size.width, size.height
 		frame := m.Render()
 		lines := strings.Split(frame, "\n")
@@ -178,7 +189,7 @@ func TestRenderRespectsTerminalGeometry(t *testing.T) {
 
 func TestMenusUseStableLeftInset(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{20, 5}, {80, 20}, {160, 40}} {
-		m := NewModel(launcherRequest()).SkipSplash()
+		m := NewModel(launcherRequest())
 		m.width, m.height = size.width, size.height
 		frame := m.Render()
 		found := false
@@ -198,7 +209,7 @@ func TestMenusUseStableLeftInset(t *testing.T) {
 }
 
 func TestScrolledListKeepsSelectedOptionVisible(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.screen = screenMain
 	m.width, m.height = 80, 13
 	m.cursors[screenMain] = len(m.options()) - 1
@@ -208,8 +219,61 @@ func TestScrolledListKeepsSelectedOptionVisible(t *testing.T) {
 	}
 }
 
+func TestMenuShowsThreeBottomAlignedRowsWithInlineDetails(t *testing.T) {
+	m := NewModel(launcherRequest())
+	m.width, m.height = 80, 20
+	lines := strings.Split(ansi.Strip(m.Render()), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("frame has %d rows, want %d", len(lines), m.height)
+	}
+	menu := lines[len(lines)-3:]
+	want := []struct{ label, detail string }{
+		{"Current agents finish", "Detected agents"},
+		{"I turn it off", "Until turned off"},
+		{"A timer expires", "Fixed duration"},
+	}
+	for index, item := range want {
+		if !strings.Contains(menu[index], item.label) || !strings.Contains(menu[index], item.detail) {
+			t.Fatalf("menu row %d does not contain inline label and detail: %q", index, menu[index])
+		}
+		if !strings.HasSuffix(strings.TrimRight(menu[index], " "), item.detail) {
+			t.Fatalf("menu row %d detail is not right aligned: %q", index, menu[index])
+		}
+	}
+	if strings.Contains(strings.Join(menu, "\n"), "Selected processes") {
+		t.Fatalf("menu rendered more than three options:\n%s", strings.Join(menu, "\n"))
+	}
+}
+
+func TestThreeRowMenuScrollsToKeepCursorVisible(t *testing.T) {
+	m := NewModel(launcherRequest())
+	m.width, m.height = 80, 20
+	m.cursors[screenMain] = len(m.options()) - 1
+	lines := strings.Split(ansi.Strip(m.Render()), "\n")
+	menu := strings.Join(lines[len(lines)-3:], "\n")
+	if !strings.Contains(menu, "Status") || !strings.Contains(menu, "Utilities") || !strings.Contains(menu, "> Quit") {
+		t.Fatalf("scrolled viewport does not show the final three options:\n%s", menu)
+	}
+	if strings.Contains(menu, "A timer expires") {
+		t.Fatalf("scrolled viewport retained an option above its three-row window:\n%s", menu)
+	}
+}
+
+func TestWordmarkPersistsAcrossMenus(t *testing.T) {
+	m := NewModel(launcherRequest())
+	m.width, m.height = 80, 20
+	m.push(screenUtilities)
+	frame := ansi.Strip(m.Render())
+	if !strings.Contains(frame, "AGENTIC MODE") || !strings.Contains(frame, "Utilities") {
+		t.Fatalf("nested menu omitted persistent wordmark or heading:\n%s", frame)
+	}
+	if first := strings.Split(frame, "\n")[0]; strings.TrimSpace(first) == "" {
+		t.Fatalf("wordmark is not top aligned:\n%s", frame)
+	}
+}
+
 func TestMinimalNumberViewKeepsInputVisible(t *testing.T) {
-	m := NewModel(launcherRequest()).SkipSplash()
+	m := NewModel(launcherRequest())
 	m.screen = screenNumber
 	m.numberValue = "25"
 	m.width, m.height = 20, 5
@@ -219,10 +283,10 @@ func TestMinimalNumberViewKeepsInputVisible(t *testing.T) {
 	}
 }
 
-func TestWideSplashIncludesPlainTextProductName(t *testing.T) {
+func TestWideMenuIncludesPlainTextProductName(t *testing.T) {
 	m := NewModel(launcherRequest())
 	m.width, m.height = 80, 20
 	if frame := m.Render(); !strings.Contains(frame, "AGENTIC MODE") {
-		t.Fatalf("splash omitted plain-text product name:\n%s", frame)
+		t.Fatalf("menu omitted plain-text product name:\n%s", frame)
 	}
 }

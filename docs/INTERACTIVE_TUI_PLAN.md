@@ -238,17 +238,18 @@ Fallbacks are part of the design:
 
 ## Animation direction
 
-The splash is a short transition, not a permanent use of screen space. Render
-`AGENTIC` over `MODE` as a large ASCII mask and move a three-to-five-cell
-brightness band across the occupied glyph cells. Use true color when
-available, downsample to ANSI-256/ANSI-16, and fall back to static ASCII under
-`NO_COLOR`, reduced motion, or constrained geometry.
+The `AGENTIC` over `MODE` wordmark is a persistent launcher header. A
+three-to-five-cell brightness band may cross the occupied glyph cells during
+the first few frames, then the wordmark settles in place while the menu stays
+visible below it. Use true color when available, downsample to
+ANSI-256/ANSI-16, and fall back to static ASCII under `NO_COLOR`, reduced
+motion, or constrained geometry.
 
-Any input skips the splash, and an interactive menu must be ready within
-300-500 ms. Reduced motion means zero decorative tick messages, not merely
+The menu is interactive on the first frame; no input is discarded to dismiss
+the wordmark. Reduced motion means zero decorative tick messages, not merely
 unchanging frames.
 
-The live working marker should be calmer than the splash. Prefer a four-frame
+The live working marker should be calmer than the startup shimmer. Prefer a four-frame
 filled-dot/blob deformation over spinner punctuation. The battery animation is
 a narrow travelling highlight within the filled cells; the fill length changes
 only when the measured percentage changes. Cap the renderer explicitly at 6
