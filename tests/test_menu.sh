@@ -257,21 +257,44 @@ assert_no_power_change
 
 printf 'Test: real launcher restores exact inherited termios after Ctrl+C\n'
 real_helper="$test_root/agenticmode-ui"
+termios_wrapper="$test_root/verify-real-helper-termios"
 (
   cd "$repo_dir"
   GOWORK=off GOFLAGS='-mod=readonly' go build -trimpath -buildvcs=false -o "$real_helper" ./cmd/agenticmode-ui
 )
+cat > "$termios_wrapper" <<'TERMIOS_WRAPPER'
+#!/bin/bash
+set -u
+/bin/stty -isig intr undef
+# PENDIN is a transient kernel input-reprint marker, not terminal
+# configuration. Normalize it before comparing every persistent flag and
+# control character byte-for-byte.
+normalized_termios() {
+  state=$(/bin/stty -g) || return 1
+  lflag=${state#*:lflag=}
+  lflag=${lflag%%:*}
+  normalized_lflag=$(printf '%x' "$((0x$lflag & ~0x20000000))")
+  printf '%s\n' "${state/:lflag=$lflag:/:lflag=$normalized_lflag:}"
+}
+before=$(normalized_termios) || exit 7
+"$AGENTICMODE_EXPECT_BIN"
+helper_status=$?
+after=$(normalized_termios) || exit 8
+if [ "$after" != "$before" ]; then
+  printf 'termios before=%s\ntermios after=%s\n' "$before" "$after" >&2
+  exit 3
+fi
+exit "$helper_status"
+TERMIOS_WRAPPER
+chmod 755 "$termios_wrapper"
 set +e
 TERM=xterm-256color \
   AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
   AGENTICMODE_UI_BIN="$real_helper" \
+  AGENTICMODE_TERMIOS_WRAPPER="$termios_wrapper" \
   /usr/bin/expect <<'EXPECT_REAL_HELPER' > "$test_root/real-helper.expect.log" 2>&1
 set timeout 20
-spawn -noecho /bin/bash --noprofile --norc
-set terminal $spawn_out(slave,name)
-exec /bin/stty -isig intr undef < $terminal
-set before [string trim [exec /bin/stty -g < $terminal]]
-send -- "$env(AGENTICMODE_EXPECT_BIN); echo MENU_STATUS:\$?\r"
+spawn -noecho $env(AGENTICMODE_TERMIOS_WRAPPER)
 expect {
   -exact "\033\[?1049h" {}
   timeout { exit 2 }
@@ -279,19 +302,11 @@ expect {
 after 2500
 send -- "\003"
 expect {
-  "MENU_STATUS:0" {}
+  eof {}
   timeout { exit 5 }
 }
-expect {
-  -exact "bash-3.2$ " {}
-  timeout { exit 6 }
-}
-set after [string trim [exec /bin/stty -g < $terminal]]
-if {$after ne $before} { exit 3 }
-exec /bin/stty echo < $terminal
-send -- "exit\r"
-expect eof
-exit 0
+set process_status [lindex [wait] 3]
+exit $process_status
 EXPECT_REAL_HELPER
 real_helper_status=$?
 set -e
