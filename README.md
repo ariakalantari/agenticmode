@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/agenticmode-wordmark.svg" width="760" alt="">
+  <img src="docs/agenticmode-wordmark.svg" width="720" alt="Agentic Mode">
 </p>
 
 # Agentic Mode
