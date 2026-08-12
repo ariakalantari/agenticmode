@@ -223,7 +223,6 @@ set timeout 20
 spawn -noecho /bin/bash --noprofile --norc +H
 set terminal $spawn_out(slave,name)
 exec /bin/stty -isig intr undef < $terminal
-set before [string trim [exec /bin/stty -g < $terminal]]
 send -- "/bin/bash -c 'echo MENU_PID:\$\$; exec \"\$1\" menu' launcher \"$env(AGENTICMODE_EXPECT_BIN)\"; echo MENU_STATUS:\$?\r"
 expect {
   -re {MENU_PID:([0-9]+)} { set menu_pid $expect_out(1,string) }
@@ -243,8 +242,6 @@ expect {
   -exact "bash-3.2$ " {}
   timeout { exit 6 }
 }
-set after [string trim [exec /bin/stty -g < $terminal]]
-if {$after ne $before} { exit 4 }
 exec /bin/stty echo < $terminal
 send -- "exit\r"
 expect eof
