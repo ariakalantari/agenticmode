@@ -4,8 +4,8 @@
 class Agenticmode < Formula
   desc "Keep a Mac awake with its lid closed while agent runs finish"
   homepage "https://github.com/ariakalantari/agenticmode"
-  url "https://github.com/ariakalantari/agenticmode/releases/download/v1.3.1/agenticmode.tar.gz"
-  sha256 "e287eff76d78fa14df6cdb5899f280623aaa3ecbd086093b27424eeced004731"
+  url "https://github.com/ariakalantari/agenticmode/releases/download/v1.3.2/agenticmode.tar.gz"
+  sha256 "d80a96398a8f0b6f5381c037c2caa80c91b7991c6303e8e4d020d5c8483b1404"
   license "MIT"
   head "https://github.com/ariakalantari/agenticmode.git", branch: "main"
 
@@ -29,8 +29,8 @@ class Agenticmode < Formula
   end
 
   test do
-    assert_equal "agenticmode 1.3.1", shell_output("#{bin}/agenticmode --version").strip
-    assert_equal "agenticmode 1.3.1", shell_output("#{bin}/am --version").strip
+    assert_equal "agenticmode 1.3.2", shell_output("#{bin}/agenticmode --version").strip
+    assert_equal "agenticmode 1.3.2", shell_output("#{bin}/am --version").strip
     assert_match(/^  agenticmode \[options\]$/, shell_output("#{bin}/agenticmode --help"))
   end
 end
