@@ -2,7 +2,7 @@
 
 set -u
 
-readonly AGENTICMODE_VERSION="1.3.1"
+readonly AGENTICMODE_VERSION="1.3.2"
 readonly AGENTICMODE_NAME="agenticmode"
 readonly AGENTICMODE_FORMULA="ariakalantari/agenticmode/agenticmode"
 readonly AGENTICMODE_RELEASE_BASE_URL="https://github.com/ariakalantari/agenticmode/releases"
@@ -103,6 +103,7 @@ agentic_finished_targets=""
 agentic_update_temporary=""
 agentic_ui_preference="${AGENTICMODE_UI:-auto}"
 agentic_ui_active=0
+agentic_ui_restore_pending=0
 agentic_ui_resized=0
 agentic_ui_columns=80
 agentic_ui_lines=24
@@ -129,10 +130,13 @@ agentic_ui_cnorm=""
 agentic_ui_clear=""
 agentic_ui_bold=""
 agentic_ui_dim=""
+agentic_ui_bright=""
 agentic_ui_screen=()
 agentic_ui_screen_style=()
+agentic_ui_screen_render=()
 agentic_ui_previous=()
 agentic_ui_previous_style=()
+agentic_ui_previous_render=()
 agentic_ui_event_states=()
 agentic_ui_events=()
 agentic_ui_target_keys=()
@@ -962,11 +966,8 @@ run_activity_api() {
   esac
 }
 
-controller_identity_matches() {
-  local pid expected_started actual_started command_line state
-  pid=$(read_numeric_file "$agentic_pid_file") || return 1
-  [ -r "$agentic_pid_started_file" ] || return 1
-  IFS= read -r expected_started < "$agentic_pid_started_file" || return 1
+controller_process_matches() {
+  local pid="$1" expected_started="$2" actual_started command_line state
   kill -0 "$pid" 2>/dev/null || return 1
   state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
   [ -n "$state" ] && [ "$state" != "Z" ] || return 1
@@ -974,6 +975,14 @@ controller_identity_matches() {
   [ -n "$actual_started" ] && [ "$actual_started" = "$expected_started" ] || return 1
   command_line=$("$agentic_ps" -p "$pid" -o command= 2>/dev/null || true)
   case "$command_line" in *agenticmode*) return 0 ;; *) return 1 ;; esac
+}
+
+controller_identity_matches() {
+  local pid expected_started
+  pid=$(read_numeric_file "$agentic_pid_file") || return 1
+  [ -r "$agentic_pid_started_file" ] || return 1
+  IFS= read -r expected_started < "$agentic_pid_started_file" || return 1
+  controller_process_matches "$pid" "$expected_started"
 }
 
 watchdog_stop_path_is_valid() {
@@ -1099,19 +1108,64 @@ release_operation_lock() {
   agentic_owns_operation=0
 }
 
-watchdog_identity_matches() {
-  local pid expected actual state
-  pid=$(read_numeric_file "$agentic_watchdog_pid_file") || return 1
-  [ -r "$agentic_watchdog_started_file" ] || return 1
-  IFS= read -r expected < "$agentic_watchdog_started_file" || return 1
+watchdog_process_matches() {
+  local pid="$1" expected="$2" actual state command_line
   state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
   [ -n "$state" ] && [ "$state" != "Z" ] || return 1
   actual=$(process_started_value "$pid")
-  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+  [ -n "$actual" ] && [ "$actual" = "$expected" ] || return 1
+  command_line=$("$agentic_ps" -p "$pid" -o command= 2>/dev/null || true)
+  case "$command_line" in
+    *agenticmode-watchdog*|*com.ariakalantari.agenticmode.watchdog*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+watchdog_identity_matches() {
+  local pid expected
+  pid=$(read_numeric_file "$agentic_watchdog_pid_file") || return 1
+  [ -r "$agentic_watchdog_started_file" ] || return 1
+  IFS= read -r expected < "$agentic_watchdog_started_file" || return 1
+  watchdog_process_matches "$pid" "$expected"
+}
+
+watchdog_lease_process_state() {
+  local processes matches
+  agentic_watchdog_lease_state="uncertain"
+  load_watchdog_stop_path || return 0
+  processes=$("$agentic_ps" -axo pid=,command= -ww 2>/dev/null) || return 0
+  matches=$(printf '%s\n' "$processes" | "$agentic_awk" -v stop_path="$agentic_stop_file" '
+    index($0, stop_path) > 0 &&
+    (index($0, "agenticmode-watchdog") > 0 || index($0, "com.ariakalantari.agenticmode.watchdog") > 0) {
+      count++
+    }
+    END { print count+0 }
+  ') || return 0
+  if [ "$matches" -eq 0 ]; then
+    agentic_watchdog_lease_state="absent"
+  else
+    agentic_watchdog_lease_state="present"
+  fi
+}
+
+watchdog_recorded_state() {
+  agentic_watchdog_record_state="uncertain"
+  if watchdog_identity_matches; then
+    agentic_watchdog_record_state="live"
+    return 0
+  fi
+  watchdog_lease_process_state
+  [ "$agentic_watchdog_lease_state" != "absent" ] || agentic_watchdog_record_state="dead"
 }
 
 drain_existing_watchdog() {
-  local baseline state attempts=0 registered=0
+  local baseline state attempts=0 registered=0 unregistered_max=50 ready_file
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS:-}" ]; then
+    case "$AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS" in
+      ''|*[!0-9]*) ;;
+      *) unregistered_max="$AGENTICMODE_TEST_UNREGISTERED_DRAIN_ATTEMPTS" ;;
+    esac
+  fi
   load_watchdog_stop_path || return 1
   baseline=$(cat "$agentic_baseline_file" 2>/dev/null || true)
   case "$baseline" in
@@ -1121,7 +1175,7 @@ drain_existing_watchdog() {
   request_watchdog_stop || return 1
   watchdog_identity_matches && registered=1
   if [ "$registered" -eq 1 ]; then
-    while watchdog_identity_matches && [ "$attempts" -lt 100 ]; do
+    while watchdog_identity_matches && [ "$attempts" -lt 200 ]; do
       attempts=$((attempts + 1))
       "$agentic_sleep" 0.1
     done
@@ -1130,14 +1184,31 @@ drain_existing_watchdog() {
     # A helper without published identity cannot pass its registration gate.
     # Keep this lease stopped permanently and allow it time to observe the
     # stop request and exit without touching pmset.
-    while [ "$attempts" -lt 50 ]; do
+    while [ "$attempts" -lt "$unregistered_max" ]; do
       attempts=$((attempts + 1))
       "$agentic_sleep" 0.1
     done
+    if [ "$agentic_stop_file" = "$agentic_legacy_stop_file" ]; then
+      return 1
+    fi
+    ready_file="${agentic_stop_file%/stop}/ready"
+    # Once the registration gate was released, missing PID metadata is not
+    # proof that the helper exited. Starting another lease could let the old
+    # helper restore its baseline over the new override.
+    [ ! -e "$ready_file" ] || return 1
   fi
   state=$(sleep_disabled_value 2>/dev/null || printf 'error')
   [ "$state" = "$baseline" ] || return 1
   [ "$registered" -eq 0 ] || retire_watchdog_lease
+}
+
+restore_recorded_baseline() {
+  local baseline
+  baseline=$(cat "$agentic_baseline_file" 2>/dev/null || true)
+  case "$baseline" in 0|1) ;; *) return 1 ;; esac
+  watchdog_identity_matches && return 1
+  "$agentic_sudo" "$agentic_pmset" -a disablesleep "$baseline" 9>&- || return 1
+  [ "$(sleep_disabled_value 2>/dev/null || printf 'error')" = "$baseline" ]
 }
 
 acquire_controller() {
@@ -1153,8 +1224,20 @@ acquire_controller() {
   fi
   if [ -d "$agentic_lock_dir" ] || [ -r "$agentic_watchdog_pid_file" ] || [ -r "$agentic_baseline_file" ] || [ -r "$agentic_watchdog_stop_path_file" ]; then
     if ! drain_existing_watchdog; then
-      release_operation_lock || true
-      fail "a previous watchdog has not finished restoring sleep; try agenticmode off again"
+      watchdog_recorded_state
+      if [ "$agentic_watchdog_record_state" = "live" ]; then
+        release_operation_lock || true
+        fail "a previous watchdog is still restoring sleep; agenticmode off can force the controller to stop"
+      fi
+      if [ "$agentic_watchdog_record_state" != "dead" ]; then
+        release_operation_lock || true
+        fail "could not verify that the previous watchdog exited; refusing to start a competing sleep lease"
+      fi
+      status_working "Recovering the previous watchdog's unfinished sleep restoration."
+      if ! restore_recorded_baseline; then
+        release_operation_lock || true
+        fail "the previous sleep setting could not be restored; run agenticmode off"
+      fi
     fi
     clear_stale_controller
   fi
@@ -1359,6 +1442,41 @@ terminal_ui_set_line() {
   terminal_ui_clip_text "$text" "$maximum"
   agentic_ui_screen[$row]="$agentic_ui_clipped"
   agentic_ui_screen_style[$row]="$style"
+  unset 'agentic_ui_screen_render[$row]'
+}
+
+terminal_ui_set_shimmer_line() {
+  local row="$1" text="$2" row_offset="${3:-0}" index character position distance style previous_style="" rendered=""
+  local width=${#text} travel_width phase
+  terminal_ui_set_line "$row" "$text"
+  text=${agentic_ui_screen[$row]-}
+  [ -n "$agentic_stdout_reset" ] || return 0
+  width=${#text}
+  travel_width=$((width + 16))
+  phase=$((agentic_ui_frame % travel_width - 8))
+  index=0
+  while [ "$index" -lt "$width" ]; do
+    character=${text:$index:1}
+    position=$((index - row_offset / 2))
+    distance=$((position - phase))
+    [ "$distance" -ge 0 ] || distance=$((-distance))
+    if [ "$character" != " " ] && [ "$distance" -eq 0 ]; then
+      style="$agentic_ui_bright"
+    elif [ "$character" != " " ] && [ "$distance" -le 2 ]; then
+      style="${agentic_stdout_green}${agentic_ui_bold}"
+    elif [ "$character" != " " ] && [ "$distance" -le 5 ]; then
+      style="${agentic_stdout_cyan}${agentic_ui_bold}"
+    else
+      style="${agentic_stdout_cyan}${agentic_ui_dim}"
+    fi
+    if [ "$style" != "$previous_style" ]; then
+      rendered="${rendered}${agentic_stdout_reset}${style}"
+      previous_style="$style"
+    fi
+    rendered="${rendered}${character}"
+    index=$((index + 1))
+  done
+  agentic_ui_screen_render[$row]="${rendered}${agentic_stdout_reset}"
 }
 
 terminal_ui_block_line() {
@@ -1423,57 +1541,24 @@ terminal_ui_tracking_label() {
   fi
 }
 
-terminal_ui_draw_full_art() {
-  local start="$1" phase=$((agentic_ui_frame % 20)) style="$agentic_stdout_cyan" agentic_ui_art_width=58
-  if [ "$phase" -eq 0 ] || [ "$phase" -eq 19 ]; then
-    terminal_ui_set_line "$((start + 4))" '                  __________________________'
-    terminal_ui_set_line "$((start + 5))" '       __________/_________________________/|'
-    terminal_ui_set_line "$((start + 6))" '      /___________________________________/ /'
-    terminal_ui_set_line "$((start + 7))" '      \___________________________________\/' "$style"
-  elif [ "$phase" -eq 1 ] || [ "$phase" -eq 18 ]; then
-    terminal_ui_set_line "$((start + 3))" '                       _____________________'
-    terminal_ui_set_line "$((start + 4))" '              ________/____________________/|'
-    terminal_ui_set_line "$((start + 5))" '       ______/                            / /'
-    terminal_ui_set_line "$((start + 6))" '      /__________________________________/ /'
-    terminal_ui_set_line "$((start + 7))" '      \__________________________________\/' "$style"
-  elif [ "$phase" -eq 2 ] || [ "$phase" -eq 17 ]; then
-    terminal_ui_set_line "$((start + 1))" '                         .-------------------.'
-    terminal_ui_set_line "$((start + 2))" '                     ___/                   /|'
-    terminal_ui_set_line "$((start + 3))" '                 ___/                     / |'
-    terminal_ui_set_line "$((start + 4))" '             ___/                        /  |'
-    terminal_ui_set_line "$((start + 5))" '        ____/___________________________/   |'
-    terminal_ui_set_line "$((start + 6))" '       /___________________________________/'
-    terminal_ui_set_line "$((start + 7))" '       \___________________________________\/' "$style"
-  else
-    terminal_ui_set_line "$start"       '                .-----------------------------.' "$style"
-    terminal_ui_set_line "$((start + 1))" '               /                             /|'
-    terminal_ui_set_line "$((start + 2))" '              /       A G E N T I C         / |' "${agentic_stdout_cyan}${agentic_ui_bold}"
-    terminal_ui_set_line "$((start + 3))" '             /          A W A K E          /  |' "${agentic_stdout_green}${agentic_ui_bold}"
-    terminal_ui_set_line "$((start + 4))" '            /                             /   |'
-    terminal_ui_set_line "$((start + 5))" '           /_____________________________/    |'
-    terminal_ui_set_line "$((start + 6))" '          /___________________________________/'
-    terminal_ui_set_line "$((start + 7))" '          \___________________________________\/' "$style"
-  fi
+terminal_ui_draw_wordmark() {
+  local start="$1"
+  terminal_ui_set_shimmer_line "$start"        ' ###   #### ##### #   # ##### #####  ####' 0
+  terminal_ui_set_shimmer_line "$((start + 1))" '#   # #     #     ##  #   #     #   #    ' 2
+  terminal_ui_set_shimmer_line "$((start + 2))" '##### # ### ####  # # #   #     #   #    ' 4
+  terminal_ui_set_shimmer_line "$((start + 3))" '#   # #   # #     #  ##   #     #   #    ' 6
+  terminal_ui_set_shimmer_line "$((start + 4))" '#   #  ###  ##### #   #   #   #####  ####' 8
+  terminal_ui_set_shimmer_line "$((start + 6))" '         #   #  ###  ####  #####         ' 12
+  terminal_ui_set_shimmer_line "$((start + 7))" '         ## ## #   # #   # #             ' 14
+  terminal_ui_set_shimmer_line "$((start + 8))" '         # # # #   # #   # ####          ' 16
+  terminal_ui_set_shimmer_line "$((start + 9))" '         #   # #   # #   # #             ' 18
+  terminal_ui_set_shimmer_line "$((start + 10))" '         #   #  ###  ####  #####         ' 20
 }
 
-terminal_ui_draw_compact_art() {
-  local start="$1" phase=$((agentic_ui_frame % 16)) style="$agentic_stdout_cyan" agentic_ui_art_width=36
-  if [ "$phase" -le 1 ] || [ "$phase" -ge 14 ]; then
-    terminal_ui_set_line "$((start + 2))" '          ___________________'
-    terminal_ui_set_line "$((start + 3))" '    _____/__________________/|'
-    terminal_ui_set_line "$((start + 4))" '   /________________________|/' "$style"
-  elif [ "$phase" -eq 2 ] || [ "$phase" -eq 13 ]; then
-    terminal_ui_set_line "$((start + 1))" '             .---------------.'
-    terminal_ui_set_line "$((start + 2))" '         ___/               /|'
-    terminal_ui_set_line "$((start + 3))" '     ___/__________________/ |'
-    terminal_ui_set_line "$((start + 4))" '    /________________________/' "$style"
-  else
-    terminal_ui_set_line "$start"       '       .----------------------.' "$style"
-    terminal_ui_set_line "$((start + 1))" '      /                      /|'
-    terminal_ui_set_line "$((start + 2))" '     /        AWAKE         / |' "${agentic_stdout_green}${agentic_ui_bold}"
-    terminal_ui_set_line "$((start + 3))" '    /______________________/  |'
-    terminal_ui_set_line "$((start + 4))" '   /_________________________/' "$style"
-  fi
+terminal_ui_draw_compact_wordmark() {
+  local start="$1"
+  terminal_ui_set_shimmer_line "$start" 'A G E N T I C' 0
+  terminal_ui_set_shimmer_line "$((start + 1))" 'M O D E' 3
 }
 
 terminal_ui_build_screen() {
@@ -1482,6 +1567,7 @@ terminal_ui_build_screen() {
   local target_state target_label hidden_targets
   agentic_ui_screen=()
   agentic_ui_screen_style=()
+  agentic_ui_screen_render=()
   agentic_ui_elapsed_seconds=$((agentic_ui_elapsed_base + SECONDS - agentic_ui_started_clock))
   [ "$agentic_ui_elapsed_seconds" -ge 0 ] || agentic_ui_elapsed_seconds=0
   terminal_ui_mode_label
@@ -1501,21 +1587,17 @@ terminal_ui_build_screen() {
   fi
   target_count=${#agentic_ui_target_keys[@]}
 
-  if [ "$agentic_ui_columns" -ge 64 ] && [ "$agentic_ui_lines" -ge 22 ]; then
+  if [ "$agentic_ui_columns" -ge 64 ] && [ "$agentic_ui_lines" -ge 24 ]; then
     target_rows="$target_count"
-    [ "$target_rows" -le 6 ] || target_rows=6
-    [ "$target_rows" -le "$((agentic_ui_lines - 20))" ] || target_rows=$((agentic_ui_lines - 20))
+    [ "$target_rows" -le "$((agentic_ui_lines - 22))" ] || target_rows=$((agentic_ui_lines - 22))
     [ "$target_rows" -ge 0 ] || target_rows=0
-    content_height=$((18 + target_rows))
+    content_height=$((19 + target_rows))
     top=$((((agentic_ui_lines - 1) - content_height) / 2 + 1))
     [ "$top" -ge 1 ] || top=1
     panel_width=$((agentic_ui_columns - 8))
-    [ "$panel_width" -le 92 ] || panel_width=92
-    terminal_ui_block_line "$top" "$panel_width" 'A G E N T I C   M O D E' "${agentic_stdout_cyan}${agentic_ui_bold}"
-    terminal_ui_block_line "$((top + 1))" "$panel_width" 'A quiet machine is still a working machine' "$agentic_ui_dim"
-    art_start=$((top + 3))
-    terminal_ui_draw_full_art "$art_start"
-    panel_top=$((art_start + 8))
+    art_start="$top"
+    terminal_ui_draw_wordmark "$art_start"
+    panel_top=$((art_start + 12))
     terminal_ui_panel_border "$panel_top" "$panel_width"
     terminal_ui_panel_line "$((panel_top + 1))" "$panel_width" "STATE" "AWAKE - sleep override active" "${agentic_stdout_green}${agentic_ui_bold}"
     terminal_ui_panel_line "$((panel_top + 2))" "$panel_width" "MODE" "$agentic_ui_mode_text"
@@ -1547,15 +1629,13 @@ terminal_ui_build_screen() {
     terminal_ui_panel_border "$((target_row + 1))" "$panel_width"
     footer_row=$((agentic_ui_lines - 1))
     terminal_ui_block_line "$footer_row" "$panel_width" 'Run am status --verbose in another terminal' "$agentic_ui_dim"
-  elif [ "$agentic_ui_columns" -ge 42 ] && [ "$agentic_ui_lines" -ge 14 ]; then
-    content_height=14
+  elif [ "$agentic_ui_columns" -ge 42 ] && [ "$agentic_ui_lines" -ge 12 ]; then
+    content_height=9
     top=$(((agentic_ui_lines - content_height) / 2 + 1))
     panel_width=$((agentic_ui_columns - 4))
-    [ "$panel_width" -le 72 ] || panel_width=72
-    terminal_ui_block_line "$top" "$panel_width" 'A G E N T I C   M O D E' "${agentic_stdout_cyan}${agentic_ui_bold}"
-    art_start=$((top + 2))
-    terminal_ui_draw_compact_art "$art_start"
-    panel_top=$((art_start + 6))
+    art_start="$top"
+    terminal_ui_draw_compact_wordmark "$art_start"
+    panel_top=$((art_start + 3))
     terminal_ui_panel_border "$panel_top" "$panel_width"
     terminal_ui_panel_line "$((panel_top + 1))" "$panel_width" "AWAKE" "$agentic_ui_mode_text" "${agentic_stdout_green}${agentic_ui_bold}"
     if [ "$target_count" -gt 0 ]; then
@@ -1571,34 +1651,30 @@ terminal_ui_build_screen() {
     terminal_ui_block_line "$agentic_ui_lines" "$panel_width" "$agentic_ui_tracking_text - Ctrl+C restores sleep" "$agentic_ui_dim"
   else
     block_width=$((agentic_ui_columns - 2))
-    [ "$block_width" -le 38 ] || block_width=38
     [ "$block_width" -ge 1 ] || block_width=1
-    top=$(((agentic_ui_lines - 6) / 2 + 1))
-    terminal_ui_block_line "$top" "$block_width" 'AGENTIC MODE' "${agentic_stdout_cyan}${agentic_ui_bold}"
-    case $((agentic_ui_frame % 6)) in
-      0|5) terminal_ui_set_line "$((top + 2))" '____/____/|' "$agentic_stdout_cyan" ;;
-      1|4) terminal_ui_set_line "$((top + 2))" '___/    /|' "$agentic_stdout_cyan" ;;
-      *) terminal_ui_set_line "$((top + 2))" '/  AWAKE /|' "${agentic_stdout_green}${agentic_ui_bold}" ;;
-    esac
+    top=$(((agentic_ui_lines - 5) / 2 + 1))
+    terminal_ui_set_shimmer_line "$top" 'AGENTIC' 0
+    terminal_ui_set_shimmer_line "$((top + 1))" 'MODE' 3
     if [ "$target_count" -gt 0 ]; then
       target_state=${agentic_ui_target_states[0]}
       case "$target_state" in working) target_label="WORKING" ;; done) target_label="DONE" ;; aborted) target_label="ABORTED" ;; ended) target_label="ENDED" ;; failed) target_label="FAILED" ;; *) target_label="RUN" ;; esac
       terminal_ui_target_style "$target_state"
-      terminal_ui_block_line "$((top + 3))" "$block_width" "$target_label  ${agentic_ui_target_titles[0]}" "$agentic_ui_target_style_value"
+      terminal_ui_block_line "$((top + 2))" "$block_width" "$target_label  ${agentic_ui_target_titles[0]}" "$agentic_ui_target_style_value"
     else
-      terminal_ui_block_line "$((top + 3))" "$block_width" "$agentic_ui_tracking_text"
+      terminal_ui_block_line "$((top + 2))" "$block_width" "$agentic_ui_tracking_text"
     fi
-    terminal_ui_block_line "$((top + 4))" "$block_width" "$time_text" "$agentic_ui_dim"
+    terminal_ui_block_line "$((top + 3))" "$block_width" "$time_text" "$agentic_ui_dim"
     terminal_ui_block_line "$agentic_ui_lines" "$block_width" 'Ctrl+C restores sleep' "$agentic_ui_dim"
   fi
 }
 
 terminal_ui_render() {
-  local row text style old_text old_style column buffer resized="$agentic_ui_resized" changed=0
+  local row text style rendered old_text old_style old_rendered column buffer resized="$agentic_ui_resized" changed=0
   if [ "$resized" -eq 1 ]; then
     terminal_ui_refresh_dimensions
     agentic_ui_previous=()
     agentic_ui_previous_style=()
+    agentic_ui_previous_render=()
     agentic_ui_resized=0
   fi
   terminal_ui_build_screen
@@ -1611,18 +1687,25 @@ terminal_ui_render() {
   while [ "$row" -le "$agentic_ui_lines" ]; do
     text=${agentic_ui_screen[$row]-}
     style=${agentic_ui_screen_style[$row]-}
+    rendered=${agentic_ui_screen_render[$row]-}
     old_text=${agentic_ui_previous[$row]-}
     old_style=${agentic_ui_previous_style[$row]-}
-    if [ "$text" != "$old_text" ] || [ "$style" != "$old_style" ]; then
+    old_rendered=${agentic_ui_previous_render[$row]-}
+    if [ "$text" != "$old_text" ] || [ "$style" != "$old_style" ] || [ "$rendered" != "$old_rendered" ]; then
       changed=1
       buffer="${buffer}"$'\033['"${row};1H"$'\033[2K'
       if [ -n "$text" ]; then
         column=$(((agentic_ui_columns - ${#text}) / 2 + 1))
         [ "$column" -ge 1 ] || column=1
-        buffer="${buffer}"$'\033['"${row};${column}H${style}${text}${agentic_stdout_reset}"
+        if [ -n "$rendered" ]; then
+          buffer="${buffer}"$'\033['"${row};${column}H${rendered}"
+        else
+          buffer="${buffer}"$'\033['"${row};${column}H${style}${text}${agentic_stdout_reset}"
+        fi
       fi
       agentic_ui_previous[$row]="$text"
       agentic_ui_previous_style[$row]="$style"
+      agentic_ui_previous_render[$row]="$rendered"
     fi
     row=$((row + 1))
   done
@@ -1643,6 +1726,7 @@ terminal_ui_start() {
   if [ -n "$agentic_stdout_reset" ]; then
     agentic_ui_bold=$'\033[1m'
     agentic_ui_dim=$'\033[2m'
+    agentic_ui_bright=$'\033[97m\033[1m'
   fi
   agentic_ui_mode="$mode"
   started=$(cat "$agentic_started_epoch_file" 2>/dev/null || printf '0')
@@ -1652,10 +1736,15 @@ terminal_ui_start() {
   [ "$agentic_ui_elapsed_seconds" -ge 0 ] || agentic_ui_elapsed_seconds=0
   agentic_ui_elapsed_base="$agentic_ui_elapsed_seconds"
   agentic_ui_started_clock="$SECONDS"
-  agentic_ui_animation="opening"
+  if [ -n "$agentic_stdout_reset" ]; then
+    agentic_ui_animation="opening"
+  else
+    agentic_ui_animation="idle"
+  fi
   agentic_ui_animation_step=0
-  agentic_ui_next_animation_clock="$SECONDS"
+  agentic_ui_next_animation_clock=$((SECONDS + 7))
   agentic_ui_active=1
+  agentic_ui_restore_pending=1
   agentic_ui_resized=1
   agentic_ui_notice_state=""
   agentic_ui_notice=""
@@ -1672,6 +1761,18 @@ terminal_ui_start() {
   printf '%s%s%s' "$agentic_ui_smcup" "$agentic_ui_clear" "$agentic_ui_civis"
 }
 
+terminal_ui_restore_terminal() {
+  [ "$agentic_ui_active" -eq 1 ] || return 0
+  printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
+  agentic_ui_active=0
+}
+
+terminal_ui_finish_restore() {
+  [ "$agentic_ui_restore_pending" -eq 1 ] || return 0
+  printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
+  agentic_ui_restore_pending=0
+}
+
 terminal_ui_stop() {
   local notice_state notice index count last_state="" last_event=""
   [ "$agentic_ui_active" -eq 1 ] || return 0
@@ -1682,10 +1783,10 @@ terminal_ui_stop() {
     last_state=${agentic_ui_event_states[$((count - 1))]}
     last_event=${agentic_ui_events[$((count - 1))]}
   fi
-  agentic_ui_active=0
-  printf '%s%s%s%s' $'\033[?2026l' "$agentic_stdout_reset" "$agentic_ui_cnorm" "$agentic_ui_rmcup"
+  terminal_ui_restore_terminal
   agentic_ui_previous=()
   agentic_ui_previous_style=()
+  agentic_ui_previous_render=()
   index=0
   while [ "$index" -lt "$count" ]; do
     terminal_ui_emit_event "${agentic_ui_event_states[$index]}" "${agentic_ui_events[$index]}"
@@ -1698,7 +1799,8 @@ terminal_ui_stop() {
 
 cleanup_controller() {
   local exit_code=$? baseline
-  trap - EXIT INT TERM HUP TSTP WINCH
+  trap - EXIT TSTP WINCH
+  trap '' INT TERM HUP
   terminal_ui_stop
   if [ -n "$agentic_timer_pid" ]; then
     kill -TERM "$agentic_timer_pid" 2>/dev/null || true
@@ -1706,10 +1808,13 @@ cleanup_controller() {
     wait "$agentic_timer_pid" 2>/dev/null || true
   fi
   if [ "$agentic_owns_controller" -eq 1 ]; then
+    status_working "Stopping agenticmode and restoring the prior sleep setting."
     if ! stop_watchdog; then
+      terminal_ui_finish_restore
       warn "the watchdog did not confirm sleep restoration; state was retained for agenticmode off"
       exit 78
     fi
+    terminal_ui_finish_restore
     if [ -n "$agentic_stop_reason" ]; then
       status_info "$agentic_stop_reason"
     fi
@@ -1726,13 +1831,27 @@ cleanup_controller() {
     release_operation_lock || true
   fi
   [ "$agentic_owns_operation" -eq 0 ] || release_operation_lock || true
+  trap - INT TERM HUP
   exit "$exit_code"
+}
+
+wake_controller_timer() {
+  [ -n "$agentic_timer_pid" ] || return 0
+  kill -TERM "$agentic_timer_pid" 2>/dev/null || true
+  kill -CONT "$agentic_timer_pid" 2>/dev/null || true
 }
 
 handle_signal() {
   local code="$1"
-  say ""
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ "${AGENTICMODE_TEST_IGNORE_TERM:-0}" = "1" ] && [ "$code" -eq 143 ]; then
+    return 0
+  fi
+  terminal_ui_stop
+  trap '' INT TERM HUP
   agentic_stop_reason="Stopping agenticmode and restoring the prior sleep setting."
+  wake_controller_timer
+  [ "$agentic_owns_controller" -eq 0 ] || request_watchdog_stop 2>/dev/null || true
+  say ""
   exit "$code"
 }
 
@@ -1769,26 +1888,23 @@ terminal_ui_animate_step() {
   local sequence_length
   case "$agentic_ui_animation" in
     opening)
-      sequence_length=4
-      case "$agentic_ui_animation_step" in 0) agentic_ui_frame=0 ;; 1) agentic_ui_frame=1 ;; 2) agentic_ui_frame=2 ;; *) agentic_ui_frame=3 ;; esac
+      sequence_length=29
+      agentic_ui_frame=$((agentic_ui_animation_step * 2))
       ;;
     cycle)
-      sequence_length=7
-      case "$agentic_ui_animation_step" in
-        0) agentic_ui_frame=17 ;; 1) agentic_ui_frame=18 ;; 2) agentic_ui_frame=19 ;;
-        3) agentic_ui_frame=0 ;; 4) agentic_ui_frame=1 ;; 5) agentic_ui_frame=2 ;; *) agentic_ui_frame=3 ;;
-      esac
+      sequence_length=29
+      agentic_ui_frame=$((agentic_ui_animation_step * 2))
       ;;
     *) return 0 ;;
   esac
   terminal_ui_render
-  controller_pause 0.2 || return 1
+  controller_pause 0.06 || return 1
   agentic_ui_animation_step=$((agentic_ui_animation_step + 1))
   if [ "$agentic_ui_animation_step" -ge "$sequence_length" ]; then
     agentic_ui_animation="idle"
     agentic_ui_animation_step=0
-    agentic_ui_frame=3
-    agentic_ui_next_animation_clock=$((SECONDS + 20))
+    agentic_ui_frame=56
+    agentic_ui_next_animation_clock=$((SECONDS + 7))
   fi
 }
 
@@ -1813,7 +1929,7 @@ controller_sleep() {
       agentic_ui_animation_step=0
       continue
     fi
-    agentic_ui_frame=3
+    agentic_ui_frame=56
     terminal_ui_render
     remaining=$((deadline - SECONDS))
     until_animation=$((agentic_ui_next_animation_clock - SECONDS))
@@ -2583,31 +2699,68 @@ run_detect() {
 }
 
 turn_off() {
-  local pid attempts=0
+  local pid controller_started attempts=0 maximum_attempts=120 forced_attempts=0 stop_sent=0 stopped=0 state
   validate_host
   validate_state_root
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_CONTROLLER_STOP_ATTEMPTS:-}" ]; then
+    case "$AGENTICMODE_TEST_CONTROLLER_STOP_ATTEMPTS" in ''|*[!0-9]*) ;; *) maximum_attempts="$AGENTICMODE_TEST_CONTROLLER_STOP_ATTEMPTS" ;; esac
+  fi
+  [ "$maximum_attempts" -ge 1 ] || maximum_attempts=1
+  status_working "Stopping agenticmode and restoring normal sleep."
   acquire_operation_lock
   if controller_identity_matches; then
     pid=$(read_numeric_file "$agentic_pid_file")
+    IFS= read -r controller_started < "$agentic_pid_started_file"
     request_watchdog_stop || { release_operation_lock || true; fail "could not signal the active watchdog safely"; }
     kill -TERM "$pid" 2>/dev/null || true
     kill -CONT "$pid" 2>/dev/null || true
     release_operation_lock || true
-    while controller_identity_matches && [ "$attempts" -lt 120 ]; do
+    while controller_identity_matches && [ "$attempts" -lt "$maximum_attempts" ]; do
       attempts=$((attempts + 1))
       "$agentic_sleep" 0.1
     done
     if controller_identity_matches; then
-      fail "the active controller did not stop; try Ctrl+C in its terminal, then run agenticmode off again"
+      if kill -STOP "$pid" 2>/dev/null; then stop_sent=1; fi
+      while [ "$stop_sent" -eq 1 ] && [ "$stopped" -eq 0 ] && [ "$forced_attempts" -lt 20 ]; do
+        state=$("$agentic_ps" -p "$pid" -o state= 2>/dev/null | "$agentic_awk" '{print substr($1,1,1)}')
+        [ "$state" = "T" ] && stopped=1
+        [ "$stopped" -eq 1 ] || "$agentic_sleep" 0.1
+        forced_attempts=$((forced_attempts + 1))
+      done
+      if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_CONTROLLER_FROZEN_FILE:-}" ]; then
+        : > "$AGENTICMODE_TEST_CONTROLLER_FROZEN_FILE"
+        while [ ! -e "${AGENTICMODE_TEST_CONTROLLER_FORCE_CONTINUE_FILE:-}" ]; do "$agentic_sleep" 0.1; done
+      fi
+      if [ "$stopped" -eq 1 ] && controller_process_matches "$pid" "$controller_started" && \
+        controller_identity_matches && [ "$(read_numeric_file "$agentic_pid_file" 2>/dev/null || true)" = "$pid" ]; then
+        warn "the active controller ignored TERM; forcing its exact process to stop"
+        kill -KILL "$pid" 2>/dev/null || true
+      else
+        [ "$stop_sent" -eq 0 ] || kill -CONT "$pid" 2>/dev/null || true
+        controller_process_matches "$pid" "$controller_started" && fail "the active controller could not be frozen and revalidated safely"
+      fi
+      forced_attempts=0
+      while controller_identity_matches && [ "$forced_attempts" -lt 50 ]; do
+        forced_attempts=$((forced_attempts + 1))
+        "$agentic_sleep" 0.1
+      done
+      controller_identity_matches && fail "the active controller could not be stopped safely"
     fi
     acquire_operation_lock
   fi
 
   if ! drain_existing_watchdog; then
-    if watchdog_identity_matches; then
-      release_operation_lock || true
-      fail "the previous watchdog is still running; retry agenticmode off"
-    fi
+    watchdog_recorded_state
+    case "$agentic_watchdog_record_state" in
+      live)
+        release_operation_lock || true
+        fail "the previous watchdog is still running; could not safely force normal sleep"
+        ;;
+      uncertain)
+        release_operation_lock || true
+        fail "could not verify that the previous watchdog exited; refusing to discard its sleep lease"
+        ;;
+    esac
     warn "the previous watchdog did not restore its baseline; forcing normal sleep now"
   fi
   clear_stale_controller
