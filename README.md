@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/agenticmode-wordmark.svg" width="760" alt="">
+  <img src="docs/agenticmode-wordmark.svg" width="720" alt="Agentic Mode">
 </p>
 
 # Agentic Mode
@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/ariakalantari/agenticmode/main/inst
 
 The direct installer can be [inspected before it is run](https://raw.githubusercontent.com/ariakalantari/agenticmode/main/install.sh). Both methods provide `agenticmode` and `am`. The direct installer asks for an administrator password during installation to place the minimal root-owned safety watchdog in `/Library/PrivilegedHelperTools`; Homebrew does this on the first awake-mode run.
 
-Every command works with either name. For example, `am current` is equivalent to `agenticmode current`.
+Every command works with either name. Running bare `am` or `agenticmode` opens the interactive launcher; explicit commands such as `am current` remain direct shortcuts.
 
 See [Installation and upgrades](https://github.com/ariakalantari/agenticmode/wiki/Installation-and-Upgrades) for pinned installs, checkout installs, custom paths, upgrades, and uninstall instructions.
 
@@ -85,17 +85,20 @@ Normal completion restores the sleep setting that existed before agenticmode sta
 
 | What you need | Command | What is tracked |
 | --- | --- | --- |
+| Choose visually | `agenticmode` | Interactive launcher; nothing changes until Start is confirmed |
 | Launch one agent or script | `agenticmode run -- command` | Exact top-level child PID |
 | Finish work already running | `agenticmode current` | A snapshot of detected runs |
 | Wait for known processes | `agenticmode wait PID...` | Exact PIDs and process start times |
-| Stay awake until manually stopped | `agenticmode` | Controller lifetime |
+| Stay awake until manually stopped | `agenticmode start` | Controller lifetime |
 | Preview `current` safely | `agenticmode detect` | Read-only detection; no power change |
 
 For interactive agents, prefer `run --` when possible. Long-lived TUI processes can remain open between prompts, so process lifetime is not always the same as work lifetime. See [Tracking modes](https://github.com/ariakalantari/agenticmode/wiki/Tracking-Modes) for detection details, supported command shapes, and tradeoffs.
 
 ## Terminal status
 
-Long-running commands open a full-screen terminal view when stdout is an interactive terminal. It uses the available width and height for a status panel, showing as many tracked runs as the current viewport permits, alongside elapsed time, progress, Codex session titles, and a responsive `AGENTIC` / `MODE` wordmark with a subtle shimmer on color terminals. Compact layouts simplify the wordmark, and very small or non-color terminals fall back to a stable static view. Every status occupies one physical line: long content ends in `...`, and resizing the terminal immediately recomputes the layout to reveal or trim content. Startup and completion messages remain in the normal scrollback after the full-screen view closes.
+Bare `am` opens a keyboard-driven launcher inspired by modern coding CLIs. Use the arrow keys or `j`/`k` to move, Enter to choose, Space to select individual sessions, `a` to select all, Escape to go back, and Ctrl+C to cancel. You can choose all current agents, exact sessions or processes, a timer, manual mode, battery floors, and maximum durations. The launcher is read-only until the final Start confirmation; Bash validates the choice and live system state again before changing power settings.
+
+Both the launcher and long-running status view respond to every terminal resize. They recalculate width, height, centering, visible list rows, clipped labels, the splash wordmark, and the battery bar from the new window geometry. Compact layouts simplify the wordmark, and tiny or non-color terminals use a stable minimal view. Every status occupies one physical line: long content ends in `...`, and widening the window reveals content again instead of preserving an earlier truncation. Startup and completion messages remain in normal scrollback after a full-screen view closes.
 
 Use `--no-ui` for compact line output, or set `AGENTICMODE_UI=plain` to make that the default. Pipes, redirected output, `TERM=dumb`, and `agenticmode run -- command` always use line output so logs and wrapped-command output remain intact. Interactive line output is capped to a readable measure and truncates with `...` instead of wrapping into misaligned continuation rows.
 
@@ -117,8 +120,11 @@ For automation, `agenticmode status --machine` emits uncolored `key=value` lines
 ## Common commands
 
 ```bash
-# Keep awake until Ctrl+C or `am off`
-am --timeout 8h --min-battery 20
+# Open the interactive launcher
+am
+
+# Direct shortcut: keep awake until Ctrl+C or `am off`
+am start --timeout 8h --min-battery 20
 
 # Show what `current` can see without changing power settings
 am detect
