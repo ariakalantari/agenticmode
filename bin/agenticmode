@@ -146,6 +146,9 @@ agentic_ui_target_states=()
 agentic_ui_target_titles=()
 agentic_terminal_columns=""
 agentic_terminal_lines=""
+agentic_terminal_saved_state=""
+agentic_terminal_interrupts_owned=0
+agentic_cleanup_active=0
 
 agentic_stdout_reset=""
 agentic_stdout_cyan=""
@@ -243,6 +246,40 @@ terminal_read_live_dimensions() {
   [ "$lines" -ge 1 ] && [ "$columns" -ge 1 ] || return 1
   agentic_terminal_lines="$lines"
   agentic_terminal_columns="$columns"
+}
+
+terminal_process_owns_foreground() {
+  local process_groups="" process_group="" terminal_group=""
+  "$agentic_stty" -g 2>/dev/null < /dev/tty > /dev/null || return 1
+  process_groups=$("$agentic_ps" -p "$$" -o pgid= -o tpgid= 2>/dev/null || true)
+  read -r process_group terminal_group <<< "$process_groups"
+  case "$process_group:$terminal_group" in *[!0-9:]*) return 1 ;; esac
+  [ "$terminal_group" -gt 0 ] && [ "$process_group" -eq "$terminal_group" ]
+}
+
+terminal_prepare_interrupts() {
+  local saved=""
+  [ "$agentic_terminal_interrupts_owned" -eq 0 ] || return 0
+  terminal_process_owns_foreground || return 0
+  saved=$("$agentic_stty" -g 2>/dev/null < /dev/tty) || return 0
+  [ -n "$saved" ] || return 0
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE:-}" ]; then
+    printf '%s\n' "$saved" > "$AGENTICMODE_TEST_TERMIOS_CAPTURED_FILE"
+  fi
+  agentic_terminal_saved_state="$saved"
+  agentic_terminal_interrupts_owned=1
+  "$agentic_stty" isig intr '^C' 2>/dev/null < /dev/tty && return 0
+  terminal_restore_interrupts
+}
+
+terminal_restore_interrupts() {
+  [ "$agentic_terminal_interrupts_owned" -eq 1 ] || return 0
+  "$agentic_stty" "$agentic_terminal_saved_state" 2>/dev/null < /dev/tty || true
+  if [ "${AGENTICMODE_TESTING:-0}" = "1" ] && [ -n "${AGENTICMODE_TEST_TERMIOS_RESTORED_FILE:-}" ]; then
+    "$agentic_stty" -g 2>/dev/null < /dev/tty > "$AGENTICMODE_TEST_TERMIOS_RESTORED_FILE" || true
+  fi
+  agentic_terminal_interrupts_owned=0
+  agentic_terminal_saved_state=""
 }
 
 terminal_columns() {
@@ -424,6 +461,7 @@ fail() {
   else
     printf '  %b%-7s%b %s\n' "$agentic_stderr_red" "ERROR" "$agentic_stderr_reset" "$*" >&2
   fi
+  [ "$agentic_cleanup_active" -eq 0 ] || terminal_restore_interrupts
   exit 1
 }
 
@@ -1415,6 +1453,10 @@ terminal_ui_can_start() {
   [ "$mode" != "run" ] || return 1
   [ "${TERM:-dumb}" != "dumb" ] || return 1
   terminal_stream_is_interactive 1 || return 1
+  if [ "${AGENTICMODE_TESTING:-0}" != "1" ] || [ "${AGENTICMODE_TEST_FORCE_TTY:-0}" != "1" ]; then
+    terminal_stream_is_interactive 0 || return 1
+    terminal_process_owns_foreground || return 1
+  fi
   [ -x "$agentic_tput" ] || return 1
 }
 
@@ -1825,8 +1867,9 @@ terminal_ui_stop() {
 
 cleanup_controller() {
   local exit_code=$? baseline
-  trap - EXIT TSTP WINCH
-  trap '' INT TERM HUP
+  agentic_cleanup_active=1
+  trap - EXIT WINCH
+  trap '' INT TERM HUP TSTP
   terminal_ui_stop
   if [ -n "$agentic_timer_pid" ]; then
     kill -TERM "$agentic_timer_pid" 2>/dev/null || true
@@ -1838,6 +1881,7 @@ cleanup_controller() {
     if ! stop_watchdog; then
       terminal_ui_finish_restore
       warn "the watchdog did not confirm sleep restoration; state was retained for agenticmode off"
+      terminal_restore_interrupts
       exit 78
     fi
     terminal_ui_finish_restore
@@ -1857,7 +1901,9 @@ cleanup_controller() {
     release_operation_lock || true
   fi
   [ "$agentic_owns_operation" -eq 0 ] || release_operation_lock || true
-  trap - INT TERM HUP
+  terminal_restore_interrupts
+  agentic_cleanup_active=0
+  trap - INT TERM HUP TSTP
   exit "$exit_code"
 }
 
@@ -2055,6 +2101,7 @@ start_controller() {
   agentic_ui_mode="$mode"
   validate_host
   install_controller_traps
+  terminal_prepare_interrupts
   acquire_controller
   ensure_watchdog_install
   printf '%s\n' "$mode" > "$agentic_mode_file"
