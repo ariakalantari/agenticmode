@@ -43,9 +43,6 @@ func (m Model) styles() palette {
 // Render returns a complete frame derived only from the current model and
 // terminal geometry. All backend-provided content is clipped to one row.
 func (m Model) Render() string {
-	if m.screen == screenSplash {
-		return m.renderSplash()
-	}
 	width, height := m.width, m.height
 	if width < 1 {
 		width = 1
@@ -61,13 +58,8 @@ func (m Model) Render() string {
 	if innerWidth < 1 {
 		innerWidth = width
 	}
-	bodyHeight := height - 4
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
-
-	content := m.renderContent(innerWidth, bodyHeight)
-	content = constrain(content, innerWidth, bodyHeight)
+	content := m.renderContent(innerWidth, height)
+	content = constrain(content, innerWidth, height)
 	return placeMenu(width, height, leftInset, content)
 }
 
@@ -80,29 +72,33 @@ func (m Model) renderMinimal(width, height int) string {
 	}
 	styles := m.styles()
 	heading, _ := m.heading()
-	lines := []string{styles.heading.Render(textutil.Clip(heading, contentWidth))}
+	lines := make([]string, height)
+	lines[0] = styles.brand.Render(textutil.Clip("AGENTIC MODE", contentWidth))
+	if height >= 3 {
+		lines[1] = styles.heading.Render(textutil.Clip(heading, contentWidth))
+	}
 	if m.screen == screenNumber {
 		if height >= 3 {
-			lines = append(lines, textutil.Clip("> "+m.numberValue+"_", contentWidth))
+			lines[height-2] = textutil.Clip("> "+m.numberValue+"_", contentWidth)
 		}
 		if height >= 4 && m.numberError != "" {
-			lines = append(lines, styles.error.Render(textutil.Clip(m.numberError, contentWidth)))
+			lines[height-3] = styles.error.Render(textutil.Clip(m.numberError, contentWidth))
 		}
 		if height >= 5 {
-			lines = append(lines, styles.dim.Render(textutil.Clip("Enter  Esc back", contentWidth)))
+			lines[height-1] = styles.dim.Render(textutil.Clip("Enter  Esc back", contentWidth))
 		}
 		return placeMenu(width, height, leftInset, constrain(strings.Join(lines, "\n"), contentWidth, height))
 	}
 	options := m.options()
-	if height >= 3 && len(options) > 0 {
+	if height >= 2 && len(options) > 0 {
 		cursor := m.cursor()
 		if cursor >= len(options) {
 			cursor = len(options) - 1
 		}
-		lines = append(lines, styles.selected.Render(textutil.Clip("> "+options[cursor].label, contentWidth)))
+		lines[height-1] = styles.selected.Render(textutil.Clip("> "+options[cursor].label, contentWidth))
 	}
 	if height >= 5 {
-		lines = append(lines, styles.dim.Render(textutil.Clip("Move j/k  Enter", contentWidth)))
+		lines[height-2] = styles.dim.Render(textutil.Clip("Move j/k  Enter", contentWidth))
 	}
 	return placeMenu(width, height, leftInset, constrain(strings.Join(lines, "\n"), contentWidth, height))
 }
@@ -110,43 +106,59 @@ func (m Model) renderMinimal(width, height int) string {
 func (m Model) renderContent(width, height int) string {
 	styles := m.styles()
 	heading, subtitle := m.heading()
-	lines := []string{}
-	if height >= 6 {
-		lines = append(lines, styles.brand.Render(textutil.Clip("AGENTIC / MODE", width)))
-	}
-	lines = append(lines, styles.heading.Render(textutil.Clip(heading, width)))
-	if subtitle != "" && height >= 8 {
-		lines = append(lines, styles.dim.Render(textutil.Clip(subtitle, width)))
+	lines := make([]string, height)
+	brand := m.renderBrand(width, height)
+	copy(lines, brand)
+	nextRow := len(brand)
+	if nextRow < height {
+		lines[nextRow] = styles.heading.Render(textutil.Clip(heading, width))
+		nextRow++
 	}
 
 	if m.screen == screenHelp {
-		lines = append(lines, "")
-		lines = append(lines, m.helpLines(width, height-len(lines)-1)...)
+		if subtitle != "" && nextRow < height {
+			lines[nextRow] = styles.dim.Render(textutil.Clip(subtitle, width))
+			nextRow++
+		}
+		help := m.helpLines(width, height-nextRow)
+		copy(lines[nextRow:], help)
 		return strings.Join(lines, "\n")
 	}
 	if m.screen == screenNumber {
-		lines = append(lines, "", textutil.Clip("> "+m.numberValue+"_", width))
-		if m.numberError != "" {
-			lines = append(lines, styles.error.Render(textutil.Clip(m.numberError, width)))
+		footerRow := height - 1
+		inputRow := footerRow - 2
+		if inputRow < nextRow {
+			inputRow = nextRow
 		}
-		lines = append(lines, "", styles.dim.Render(textutil.Clip("Enter confirm  Esc back  Ctrl+C cancel", width)))
+		if subtitle != "" && nextRow < inputRow {
+			lines[nextRow] = styles.dim.Render(textutil.Clip(subtitle, width))
+		}
+		if inputRow < footerRow {
+			lines[inputRow] = textutil.Clip("> "+m.numberValue+"_", width)
+		}
+		if m.numberError != "" && inputRow+1 < footerRow {
+			lines[inputRow+1] = styles.error.Render(textutil.Clip(m.numberError, width))
+		}
+		lines[footerRow] = styles.dim.Render(textutil.Clip("Enter confirm  Esc back  Ctrl+C cancel", width))
 		return strings.Join(lines, "\n")
 	}
 
-	if (m.screen == screenSafeguards || m.screen == screenBattery) && height >= 13 {
-		lines = append(lines, "", m.renderBatteryBar(width))
-	}
-	lines = append(lines, "")
 	options := m.options()
-	available := height - len(lines) - 2
-	if available < 1 {
-		available = 1
+	visibleRows := min(3, len(options))
+	menuStart := height - visibleRows
+	footerRow := menuStart - 1
+	if subtitle != "" && nextRow < footerRow {
+		lines[nextRow] = styles.dim.Render(textutil.Clip(subtitle, width))
+		nextRow++
 	}
-	listLines := m.renderOptions(options, width, available)
-	lines = append(lines, listLines...)
-	if len(lines) < height {
-		lines = append(lines, "")
-		lines = append(lines, styles.dim.Render(textutil.Clip(m.footer(), width)))
+	if (m.screen == screenSafeguards || m.screen == screenBattery) && nextRow < footerRow {
+		lines[nextRow] = m.renderBatteryBar(width)
+	}
+	if footerRow >= 0 {
+		lines[footerRow] = styles.dim.Render(textutil.Clip(m.footer(), width))
+	}
+	if visibleRows > 0 {
+		copy(lines[menuStart:], m.renderOptions(options, width, visibleRows))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -225,25 +237,39 @@ func (m Model) renderOptions(options []option, width, rows int) []string {
 				prefix += "[ ] "
 			}
 		}
-		label := textutil.Clip(prefix+item.label, width)
+		label, detail, gap := optionColumns(prefix+item.label, item.detail, width)
 		switch {
 		case item.disabled:
 			label = styles.dim.Render(label)
 		case index == cursor:
 			label = styles.selected.Render(label)
 		}
-		result = append(result, label)
-		if index == cursor && rows-len(result) > 0 && item.detail != "" && rows >= 4 {
-			result = append(result, styles.dim.Render(textutil.Clip("    "+item.detail, width)))
+		if detail != "" {
+			label += strings.Repeat(" ", gap) + styles.dim.Render(detail)
 		}
-	}
-	if start > 0 && len(result) > 0 && start != cursor {
-		result[0] = styles.dim.Render(textutil.Clip(fmt.Sprintf("... %d above", start), width))
-	}
-	if end < len(options) && len(result) > 0 && end-1 != cursor {
-		result[len(result)-1] = styles.dim.Render(textutil.Clip(fmt.Sprintf("... %d more", len(options)-end), width))
+		result = append(result, label)
 	}
 	return result
+}
+
+// optionColumns keeps every option on one stable row: its label is anchored
+// left and its short explanation is anchored at the right edge.
+func optionColumns(label, detail string, width int) (string, string, int) {
+	label = textutil.Sanitize(label)
+	detail = textutil.Sanitize(detail)
+	if detail == "" || width < 16 {
+		return textutil.Clip(label, width), "", 0
+	}
+	detailLimit := min(24, width/2)
+	detail = textutil.Clip(detail, detailLimit)
+	detailWidth := ansi.StringWidth(detail)
+	labelWidth := width - detailWidth - 2
+	if labelWidth < 8 {
+		return textutil.Clip(label, width), "", 0
+	}
+	label = textutil.Clip(label, labelWidth)
+	gap := width - ansi.StringWidth(label) - detailWidth
+	return label, detail, gap
 }
 
 func (m Model) renderBatteryBar(width int) string {
@@ -310,48 +336,60 @@ func (m Model) helpLines(width, rows int) []string {
 	return items
 }
 
-func (m Model) renderSplash() string {
-	width, height := m.width, m.height
-	if width < 1 {
-		width = 1
+func (m Model) renderBrand(width, height int) []string {
+	if width < 44 || height < 18 {
+		return []string{
+			centerLine(m.styles().brand.Render("AGENTIC"), width),
+			centerLine(m.styles().brand.Render("MODE"), width),
+		}
 	}
-	if height < 1 {
-		height = 1
-	}
-	if width < 48 || height < 15 {
-		content := m.styles().brand.Render(textutil.Clip("AGENTIC\nMODE", width))
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
-	}
-	mask := []string{
+	agenticMask := []string{
 		"  A   GGG  EEEEE N   N TTTTT IIIII  CCCC",
 		" A A G     E     NN  N   T     I   C    ",
 		"AAAAAG  GG EEEE  N N N   T     I   C    ",
 		"A   AG   G E     N  NN   T     I   C    ",
 		"A   A GGG  EEEEE N   N   T   IIIII  CCCC",
-		"",
-		"             M   M  OOO  DDDD  EEEEE",
-		"             MM MM O   O D   D E    ",
-		"             M M M O   O D   D EEEE ",
-		"             M   M O   O D   D E    ",
-		"             M   M  OOO  DDDD  EEEEE",
 	}
-	lines := make([]string, len(mask))
-	for row, line := range mask {
-		lines[row] = m.shimmer(line, row)
+	modeMask := []string{
+		"M   M  OOO  DDDD  EEEEE",
+		"MM MM O   O D   D E    ",
+		"M M M O   O D   D EEEE ",
+		"M   M O   O D   D E    ",
+		"M   M  OOO  DDDD  EEEEE",
 	}
-	content := strings.Join(lines, "\n")
-	// Keep the product name available as plain text for screen readers, logs,
-	// and terminals whose font makes the block-art lettering ambiguous.
-	content += "\n" + m.styles().dim.Render("AGENTIC MODE")
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
+	lines := m.renderMaskBlock(agenticMask, width, 0)
+	lines = append(lines, "")
+	lines = append(lines, m.renderMaskBlock(modeMask, width, len(lines))...)
+	// Keep the product name available as plain text for terminals whose font
+	// makes the block-art lettering ambiguous.
+	lines = append(lines, centerLine(m.styles().dim.Render("AGENTIC MODE"), width))
+	return lines
 }
 
-func (m Model) shimmer(line string, row int) string {
+func (m Model) renderMaskBlock(mask []string, width, rowOffset int) []string {
+	blockWidth := 0
+	for _, line := range mask {
+		blockWidth = max(blockWidth, ansi.StringWidth(strings.TrimRight(line, " ")))
+	}
+	left := max(0, (width-blockWidth)/2)
+	lines := make([]string, len(mask))
+	for row, line := range mask {
+		line = strings.TrimRight(line, " ")
+		lines[row] = strings.Repeat(" ", left) + m.shimmer(line, row+rowOffset, blockWidth)
+	}
+	return lines
+}
+
+func centerLine(line string, width int) string {
+	return strings.Repeat(" ", max(0, (width-ansi.StringWidth(line))/2)) + line
+}
+
+func (m Model) shimmer(line string, row, span int) string {
 	if m.noColor || m.reducedMotion {
 		return line
 	}
 	var result strings.Builder
-	phase := (m.frame*7 + row) % 55
+	phase := (m.frame+row)%(span+12) - 6
 	for column, r := range line {
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#178A9A"))
 		distance := column - phase
