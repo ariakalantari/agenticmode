@@ -167,6 +167,26 @@ func TestLauncherIsInteractiveOnFirstFrame(t *testing.T) {
 	}
 }
 
+func TestShimmerKeepsAnimating(t *testing.T) {
+	m := NewModel(launcherRequest())
+	m.noColor = false
+	m.reducedMotion = false
+	m.width, m.height = 80, 20
+	m.frame = 8
+	before := m.Render()
+	updated, command := m.Update(tickMsg{})
+	m = updated.(Model)
+	if m.frame != 9 {
+		t.Fatalf("continuing shimmer frame = %d, want 9", m.frame)
+	}
+	if command == nil {
+		t.Fatal("shimmer stopped scheduling ticks after a complete cycle")
+	}
+	if after := m.Render(); after == before {
+		t.Fatal("shimmer tick did not change the rendered frame")
+	}
+}
+
 func TestRenderRespectsTerminalGeometry(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{20, 5}, {80, 20}, {120, 30}, {200, 60}} {
 		m := NewModel(launcherRequest())
@@ -270,6 +290,44 @@ func TestWordmarkPersistsAcrossMenus(t *testing.T) {
 	if first := strings.Split(frame, "\n")[0]; strings.TrimSpace(first) == "" {
 		t.Fatalf("wordmark is not top aligned:\n%s", frame)
 	}
+}
+
+func TestWordmarkBlocksShareVisualCenter(t *testing.T) {
+	m := NewModel(launcherRequest())
+	m.noColor = true
+	lines := m.renderBrand(109, 33)
+	agenticLeft, agenticRight := textBounds(lines[:5])
+	modeLeft, modeRight := textBounds(lines[6:11])
+	delta := (agenticLeft + agenticRight) - (modeLeft + modeRight)
+	if delta < -1 || delta > 1 {
+		t.Fatalf("wordmark centers differ: AGENTIC %d..%d, MODE %d..%d", agenticLeft, agenticRight, modeLeft, modeRight)
+	}
+	compact := m.renderBrand(40, 10)
+	agenticLeft, agenticRight = textBounds(compact[:1])
+	modeLeft, modeRight = textBounds(compact[1:])
+	delta = (agenticLeft + agenticRight) - (modeLeft + modeRight)
+	if delta < -1 || delta > 1 {
+		t.Fatalf("compact wordmark centers differ: AGENTIC %d..%d, MODE %d..%d", agenticLeft, agenticRight, modeLeft, modeRight)
+	}
+}
+
+func textBounds(lines []string) (int, int) {
+	left, right := -1, -1
+	for _, line := range lines {
+		line = ansi.Strip(line)
+		for column, char := range line {
+			if char == ' ' {
+				continue
+			}
+			if left < 0 || column < left {
+				left = column
+			}
+			if column > right {
+				right = column
+			}
+		}
+	}
+	return left, right
 }
 
 func TestMinimalNumberViewKeepsInputVisible(t *testing.T) {

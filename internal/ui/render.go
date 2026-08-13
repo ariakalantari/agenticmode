@@ -340,34 +340,43 @@ func (m Model) renderBrand(width, height int) []string {
 	if width < 44 || height < 18 {
 		return []string{
 			centerLine(m.styles().brand.Render("AGENTIC"), width),
-			centerLine(m.styles().brand.Render("  MODE"), width),
+			centerLine(m.styles().brand.Render("MODE"), width),
 		}
 	}
-	mask := []string{
+	agenticMask := []string{
 		"  A   GGG  EEEEE N   N TTTTT IIIII  CCCC",
 		" A A G     E     NN  N   T     I   C    ",
 		"AAAAAG  GG EEEE  N N N   T     I   C    ",
 		"A   AG   G E     N  NN   T     I   C    ",
 		"A   A GGG  EEEEE N   N   T   IIIII  CCCC",
-		"",
-		"             M   M  OOO  DDDD  EEEEE",
-		"             MM MM O   O D   D E    ",
-		"             M M M O   O D   D EEEE ",
-		"             M   M O   O D   D E    ",
-		"             M   M  OOO  DDDD  EEEEE",
 	}
-	lines := make([]string, len(mask))
-	maskWidth := 0
-	for _, line := range mask {
-		maskWidth = max(maskWidth, ansi.StringWidth(line))
+	modeMask := []string{
+		"M   M  OOO  DDDD  EEEEE",
+		"MM MM O   O D   D E    ",
+		"M M M O   O D   D EEEE ",
+		"M   M O   O D   D E    ",
+		"M   M  OOO  DDDD  EEEEE",
 	}
-	left := max(0, (width-maskWidth)/2)
-	for row, line := range mask {
-		lines[row] = strings.Repeat(" ", left) + m.shimmer(line, row)
-	}
+	lines := m.renderMaskBlock(agenticMask, width, 0)
+	lines = append(lines, "")
+	lines = append(lines, m.renderMaskBlock(modeMask, width, len(lines))...)
 	// Keep the product name available as plain text for terminals whose font
 	// makes the block-art lettering ambiguous.
 	lines = append(lines, centerLine(m.styles().dim.Render("AGENTIC MODE"), width))
+	return lines
+}
+
+func (m Model) renderMaskBlock(mask []string, width, rowOffset int) []string {
+	blockWidth := 0
+	for _, line := range mask {
+		blockWidth = max(blockWidth, ansi.StringWidth(strings.TrimRight(line, " ")))
+	}
+	left := max(0, (width-blockWidth)/2)
+	lines := make([]string, len(mask))
+	for row, line := range mask {
+		line = strings.TrimRight(line, " ")
+		lines[row] = strings.Repeat(" ", left) + m.shimmer(line, row+rowOffset, blockWidth)
+	}
 	return lines
 }
 
@@ -375,12 +384,12 @@ func centerLine(line string, width int) string {
 	return strings.Repeat(" ", max(0, (width-ansi.StringWidth(line))/2)) + line
 }
 
-func (m Model) shimmer(line string, row int) string {
+func (m Model) shimmer(line string, row, span int) string {
 	if m.noColor || m.reducedMotion {
 		return line
 	}
 	var result strings.Builder
-	phase := (m.frame*7 + row) % 55
+	phase := (m.frame+row)%(span+12) - 6
 	for column, r := range line {
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#178A9A"))
 		distance := column - phase

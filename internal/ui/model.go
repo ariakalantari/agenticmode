@@ -85,7 +85,7 @@ func NewModel(request protocol.Request) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	if !m.reducedMotion && m.frame < 8 {
+	if !m.reducedMotion && !m.noColor {
 		return tickAfter()
 	}
 	return nil
@@ -108,10 +108,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 	case tickMsg:
-		m.frame++
-		if m.frame >= 8 {
+		if m.reducedMotion || m.noColor {
 			return m, nil
 		}
+		m.frame++
 		return m, tickAfter()
 	case tea.KeyPressMsg:
 		key := msg.Keystroke()

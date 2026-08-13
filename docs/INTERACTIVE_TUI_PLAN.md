@@ -238,12 +238,12 @@ Fallbacks are part of the design:
 
 ## Animation direction
 
-The `AGENTIC` over `MODE` wordmark is a persistent launcher header. A
-three-to-five-cell brightness band may cross the occupied glyph cells during
-the first few frames, then the wordmark settles in place while the menu stays
-visible below it. Use true color when available, downsample to
-ANSI-256/ANSI-16, and fall back to static ASCII under `NO_COLOR`, reduced
-motion, or constrained geometry.
+The `AGENTIC` over `MODE` wordmark is a persistent launcher header. Center the
+two word blocks independently so their visual midpoints align. A
+three-to-five-cell brightness band continuously crosses the occupied glyphs
+while the menu stays visible below it. Use true color when available,
+downsample to ANSI-256/ANSI-16, and fall back to static ASCII under `NO_COLOR`,
+reduced motion, or constrained geometry.
 
 The menu is interactive on the first frame; no input is discarded to dismiss
 the wordmark. Reduced motion means zero decorative tick messages, not merely
