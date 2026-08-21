@@ -1859,7 +1859,10 @@ terminal_ui_drain_input() {
   local discarded
   [ "$agentic_ui_active" -eq 1 ] && [ "$agentic_terminal_interrupts_owned" -eq 1 ] && \
     [ "${AGENTICMODE_TEST_FORCE_TTY:-0}" != "1" ] || return 0
-  while IFS= read -r -s -n 1 -t 0.01 discarded < /dev/tty; do :; done
+  # terminal_ui_start configures noncanonical input with min 0 and time 0, so
+  # this read drains queued bytes and returns immediately when the queue is
+  # empty. Avoid fractional read timeouts: macOS /bin/bash 3.2 rejects them.
+  while IFS= read -r -s discarded < /dev/tty 2>/dev/null; do :; done
 }
 
 terminal_ui_restore_terminal() {

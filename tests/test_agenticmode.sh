@@ -285,6 +285,52 @@ assert_contains "Stopping agenticmode and restoring the prior sleep setting" "$t
 printf 'none\n' > "$pmset_fail_value_file"
 printf '0\n' > "$pmset_fail_count_file"
 
+printf 'Test: full-screen input drain supports Bash 3.2 and consumes queued keys\n'
+set +e
+AGENTICMODE_EXPECT_BIN="$repo_dir/bin/agenticmode" \
+  AGENTICMODE_EXPECT_LOG="$test_root/bash32-input-drain.log" \
+  /usr/bin/expect <<'EXPECT_BASH32_INPUT_DRAIN' > "$test_root/bash32-input-drain.expect.log" 2>&1
+log_file -noappend $env(AGENTICMODE_EXPECT_LOG)
+set timeout 15
+set env(TERM) xterm-256color
+set env(NO_COLOR) 1
+set env(PS1) "AGENTIC_PROMPT> "
+spawn -noecho /bin/bash --noprofile --norc
+expect {
+  -exact "AGENTIC_PROMPT> " {}
+  timeout { exit 2 }
+}
+send -- "$env(AGENTICMODE_EXPECT_BIN) start --poll 1 --timeout 4s; echo AGENTIC_STATUS:\$?\r"
+expect {
+  "AWAKE - sleep override active" {}
+  timeout { exit 3 }
+}
+send -- "queuedinput"
+after 300
+expect {
+  "AGENTIC_STATUS:75" {}
+  timeout { exit 4 }
+}
+expect {
+  -exact "AGENTIC_PROMPT> " {}
+  timeout { exit 5 }
+}
+send -- "printf '\\104\\122\\101\\111\\116\\137\\117\\113\\n'\r"
+expect {
+  "DRAIN_OK" {}
+  timeout { exit 6 }
+}
+send -- "exit\r"
+expect eof
+EXPECT_BASH32_INPUT_DRAIN
+bash32_input_drain_status=$?
+set -e
+[ "$bash32_input_drain_status" -eq 0 ] || dump_logs
+assert_equals 0 "$bash32_input_drain_status"
+wait_for_value 0 "$pmset_state"
+assert_not_contains "invalid timeout specification" "$test_root/bash32-input-drain.log"
+assert_contains "DRAIN_OK" "$test_root/bash32-input-drain.log"
+
 printf 'Test: current repairs Ctrl+C delivery and restores inherited termios\n'
 /bin/sleep 30 &
 child_pid=$!
